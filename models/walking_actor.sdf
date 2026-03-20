@@ -1,0 +1,21 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <actor name="walking_actor">
+    <plugin
+      filename="libgz_human_actor_animation_control.so"
+      name="gz_human_sim::ActorAnimationControlPlugin">
+      <animation_name>walk</animation_name>
+      <playback_speed>1.0</playback_speed>
+      <linear_threshold>0.0001</linear_threshold>
+      <angular_threshold>0.0001</angular_threshold>
+    </plugin>
+    <skin>
+      <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
+      <scale>1.0</scale>
+    </skin>
+    <animation name="walk">
+      <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
+      <interpolate_x>false</interpolate_x>
+    </animation>
+  </actor>
+</sdf>
