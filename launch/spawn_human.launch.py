@@ -1,3 +1,6 @@
+import importlib.util
+import os
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.actions import OpaqueFunction
@@ -6,6 +9,28 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+
+
+def _load_human_model_utils(context):
+    package_share = FindPackageShare('gz_human_sim').perform(context)
+    module_path = os.path.join(
+        package_share,
+        'scripts',
+        'human_model_utils.py',
+    )
+    spec = importlib.util.spec_from_file_location('human_model_utils', module_path)
+    module = importlib.util.module_from_spec(spec)
+    if spec.loader is None:
+        raise RuntimeError(f'Failed to load helper module: {module_path}')
+    spec.loader.exec_module(module)
+    return module
+
+
+def _generate_custom_human_model(context):
+    package_share = FindPackageShare('gz_human_sim').perform(context)
+    human_pose = LaunchConfiguration('human_pose').perform(context)
+    human_model_utils = _load_human_model_utils(context)
+    return human_model_utils.generate_custom_human_model(package_share, human_pose)
 
 
 def _spawn_human_cmd(context, *_args, **_kwargs):
@@ -34,16 +59,18 @@ def _spawn_human_cmd(context, *_args, **_kwargs):
             'walking_actor.sdf',
         ]
     ).perform(context)
-
     if not model_file:
         if human_model == 'person_standing':
             model_file = standing_model_file
         elif human_model == 'walking_actor':
             model_file = walking_model_file
+        elif human_model == 'custom_human':
+            model_file = _generate_custom_human_model(context)
         else:
             raise RuntimeError(
                 "Unsupported human_model '{}'. Use 'person_standing', "
-                "'walking_actor', or pass model_file explicitly.".format(human_model)
+                "'walking_actor', 'custom_human', or pass "
+                "model_file explicitly.".format(human_model)
             )
 
     return [
@@ -82,7 +109,7 @@ def generate_launch_description():
     )
     declare_world_name_cmd = DeclareLaunchArgument(
         'world_name',
-        default_value='rcjo2025_arena',
+        default_value='rcjo2025_arena_version_1',
         description='Gazebo world name'
     )
     declare_enable_teleop_cmd = DeclareLaunchArgument(
@@ -102,8 +129,13 @@ def generate_launch_description():
     )
     declare_human_model_cmd = DeclareLaunchArgument(
         'human_model',
-        default_value='person_standing',
-        description='Human model preset: person_standing or walking_actor'
+        default_value='custom_human',
+        description='Human model preset: person_standing, walking_actor, or custom_human'
+    )
+    declare_human_pose_cmd = DeclareLaunchArgument(
+        'human_pose',
+        default_value='raise_right_hand',
+        description='Custom human pose preset. Supported: raise_right_hand'
     )
     declare_model_file_cmd = DeclareLaunchArgument(
         'model_file',
@@ -187,6 +219,7 @@ def generate_launch_description():
         declare_device_cmd,
         declare_model_name_cmd,
         declare_human_model_cmd,
+        declare_human_pose_cmd,
         declare_model_file_cmd,
         declare_x_cmd,
         declare_y_cmd,

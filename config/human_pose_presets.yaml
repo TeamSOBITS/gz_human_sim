@@ -1,0 +1,70 @@
+pose_presets:
+  raise_right_hand:
+    - joint_name: jC7RightShoulder_rotx
+      child_link_name: RightShoulder
+      rpy: [-0.2, 0.0, 0.0]
+    - joint_name: jRightShoulder_rotx
+      child_link_name: RightShoulder_f1
+      rpy: [-1.4, 0.0, 0.0]
+    - joint_name: jRightShoulder_roty
+      child_link_name: RightShoulder_f2
+      rpy: [0.0, 0.15, 0.0]
+    - joint_name: jRightElbow_rotz
+      child_link_name: RightForeArm
+      rpy: [0.0, 0.0, 0.35]
+    - joint_name: jRightWrist_rotx
+      child_link_name: RightHand_f1
+      rpy: [0.15, -1.5708, 0.0]
+    - joint_name: jLeftShoulder_rotz
+      child_link_name: LeftUpperArm
+      rpy: [-1.5708, 0.0, 0.0]
+  raise_left_hand:
+    - joint_name: jC7LeftShoulder_rotx
+      child_link_name: LeftShoulder
+      rpy: [0.2, 0.0, 0.0]
+    - joint_name: jLeftShoulder_rotx
+      child_link_name: LeftShoulder_f1
+      rpy: [1.4, 0.0, 0.0]
+    - joint_name: jLeftShoulder_roty
+      child_link_name: LeftShoulder_f2
+      rpy: [0.0, 0.15, 0.0]
+    - joint_name: jLeftElbow_rotz
+      child_link_name: LeftForeArm
+      rpy: [0.0, 0.0, -0.35]
+    - joint_name: jLeftWrist_rotx
+      child_link_name: LeftHand_f1
+      rpy: [-0.15, 1.5708, 0.0]
+    - joint_name: jRightShoulder_rotz
+      child_link_name: RightUpperArm
+      rpy: [1.5708, 0.0, 0.0]
+  raise_both_hand:
+    - joint_name: jC7RightShoulder_rotx
+      child_link_name: RightShoulder
+      rpy: [-0.2, 0.0, 0.0]
+    - joint_name: jRightShoulder_rotx
+      child_link_name: RightShoulder_f1
+      rpy: [-1.4, 0.0, 0.0]
+    - joint_name: jRightShoulder_roty
+      child_link_name: RightShoulder_f2
+      rpy: [0.0, 0.15, 0.0]
+    - joint_name: jRightElbow_rotz
+      child_link_name: RightForeArm
+      rpy: [0.0, 0.0, 0.35]
+    - joint_name: jRightWrist_rotx
+      child_link_name: RightHand_f1
+      rpy: [0.15, -1.5708, 0.0]
+    - joint_name: jC7LeftShoulder_rotx
+      child_link_name: LeftShoulder
+      rpy: [0.2, 0.0, 0.0]
+    - joint_name: jLeftShoulder_rotx
+      child_link_name: LeftShoulder_f1
+      rpy: [1.4, 0.0, 0.0]
+    - joint_name: jLeftShoulder_roty
+      child_link_name: LeftShoulder_f2
+      rpy: [0.0, 0.15, 0.0]
+    - joint_name: jLeftElbow_rotz
+      child_link_name: LeftForeArm
+      rpy: [0.0, 0.0, -0.35]
+    - joint_name: jLeftWrist_rotx
+      child_link_name: LeftHand_f1
+      rpy: [-0.15, 1.5708, 0.0]
