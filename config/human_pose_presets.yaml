@@ -37,7 +37,7 @@ pose_presets:
     - joint_name: jRightShoulder_rotz
       child_link_name: RightUpperArm
       rpy: [1.5708, 0.0, 0.0]
-  raise_both_hand:
+  raise_both_hands:
     - joint_name: jC7RightShoulder_rotx
       child_link_name: RightShoulder
       rpy: [-0.2, 0.0, 0.0]
