@@ -31,6 +31,9 @@ class HumanCmdVelController(Node):
         update_rate = float(self.get_parameter("update_rate_hz").value)
 
         self.current_twist = Twist()
+        self.entity_ready = False
+        self.pending_pose_future = None
+        self.wait_log_count = 0
 
         self.client = self.create_client(SetEntityPose, f"/world/{self.world_name}/set_pose")
         self.get_logger().info(f"Waiting for /world/{self.world_name}/set_pose service...")
@@ -52,6 +55,9 @@ class HumanCmdVelController(Node):
         return 0.0, 0.0, math.sin(half), math.cos(half)
 
     def set_pose(self) -> None:
+        if self.pending_pose_future is not None and not self.pending_pose_future.done():
+            return
+
         request = SetEntityPose.Request()
         request.entity.name = self.model_name
 
@@ -66,9 +72,37 @@ class HumanCmdVelController(Node):
         pose.orientation.w = qw
         request.pose = pose
 
-        self.client.call_async(request)
+        self.pending_pose_future = self.client.call_async(request)
+        self.pending_pose_future.add_done_callback(self._handle_set_pose_result)
+
+    def _handle_set_pose_result(self, future) -> None:
+        self.pending_pose_future = None
+
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to call set_pose for {self.model_name}: {exc}")
+            return
+
+        if response is not None and response.success:
+            if not self.entity_ready:
+                self.get_logger().info(f"{self.model_name} is ready for teleop control.")
+            self.entity_ready = True
+            self.wait_log_count = 0
+            return
+
+        if self.entity_ready:
+            self.get_logger().warning(f"Lost pose control for {self.model_name}; waiting for Gazebo entity again.")
+        elif self.wait_log_count < 5:
+            self.get_logger().info(f"Waiting for Gazebo entity {self.model_name} to appear before teleop starts.")
+            self.wait_log_count += 1
+        self.entity_ready = False
 
     def update_pose(self) -> None:
+        if not self.entity_ready:
+            self.set_pose()
+            return
+
         dt = float(self.timer.timer_period_ns) * 1e-9
 
         self.yaw += self.current_twist.angular.z * dt
