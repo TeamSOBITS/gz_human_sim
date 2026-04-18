@@ -15,7 +15,6 @@
   <depend>launch_ros</depend>
   <depend>ros_gz_sim</depend>
   <depend>ros_gz_interfaces</depend>
-  <depend>sobits_gazebo_worlds</depend>
   <depend>gz-plugin2</depend>
   <depend>gz-sim8</depend>
 
