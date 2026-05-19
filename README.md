@@ -119,6 +119,30 @@
 3. 必要であれば teleop を起動する
    - `enable_teleop:=true` にすると `sobits_teleop` 側の human teleop stack も同時に起動する．
 
+### humanモデルをRVizで表示する
+
+human モデルの関節を GUI で調整しながら確認したい場合は、RViz 表示用の launch を使います。
+
+```bash
+$ ros2 launch gz_human_sim display_human.launch.py
+```
+
+`use_gui:=True` のときは `joint_state_publisher_gui` が起動し、`use_gui:=False` のときは `joint_state_publisher` が起動します。RViz には human モデル表示に必要な RobotModel と TF の設定が読み込まれます。
+
+#### 表示されない場合のチェック
+
+- RVizの`RobotModel`が有効で、`Robot Description`が`robot_description`になっているか
+- `Fixed Frame`がURDFの基準リンク(例: `Pelvis`)と一致しているか
+- `ros2 pkg prefix gz_human_sim`でパッケージが解決できるか(インストールと`source`漏れの確認)
+- `/joint_states`が出ているか (`use_gui:=True`時はGUI操作で値が更新されるか)
+- `use_sim_time`を使う場合は `use_sim_time:=True` を指定して時間基準を揃える
+
+#### 推奨起動例
+
+```bash
+$ ros2 launch gz_human_sim display_human.launch.py use_gui:=True use_sim_time:=False
+```
+
 <p align="right">(<a href="#readme-top">上に戻る</a>)</p>
 
 
@@ -137,6 +161,15 @@ $ ros2 launch gz_human_sim spawn_human.launch.py \
     model_name:=gz_human \
     human_model:=person_standing \
     x:=-2.0 y:=1.5 z:=0.0 yaw:=0.0
+```
+
+custom human の姿勢を使う場合は、`human_model:=custom_human` と `human_pose:=...` を指定します。利用可能な姿勢は `config/human_pose_presets.yaml` に定義されています。
+
+```bash
+$ ros2 launch gz_human_sim spawn_human.launch.py \
+  model_name:=gz_human \
+  human_model:=custom_human \
+  human_pose:=raise_right_hand
 ```
 
 <p align="right">(<a href="#readme-top">上に戻る</a>)</p>
@@ -200,6 +233,7 @@ $ ros2 launch gz_human_sim spawn_human.launch.py \
 | `device` | `keyboard`, `ps4`, `ps5`, `quest` |
 | `model_name` | Gazebo 上の human entity 名 |
 | `human_model` | `person_standing` または `walking_actor` |
+| `human_pose` | `custom_human` 使用時の姿勢プリセット。`config/human_pose_presets.yaml` に定義 |
 | `model_file` | 明示的な SDF ファイルパス．指定時は `human_model` より優先 |
 | `x`, `y`, `z`, `yaw` | spawn pose |
 

@@ -31,6 +31,7 @@ install(DIRECTORY
   config
   launch
   models
+  rviz
   scripts
   DESTINATION share/${PROJECT_NAME}
 )

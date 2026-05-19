@@ -119,6 +119,30 @@ Typical workflow when using `gz_human_sim`:
 3. Start teleop if needed.
    - Set `enable_teleop:=true` to launch the human teleop stack from `sobits_teleop` at the same time.
 
+### Display a Human Model in RViz
+
+Use the RViz display launch to inspect joints with GUI sliders.
+
+```bash
+$ ros2 launch gz_human_sim display_human.launch.py
+```
+
+When `use_gui:=True`, `joint_state_publisher_gui` starts. When `use_gui:=False`, `joint_state_publisher` starts. The RViz config loads RobotModel and TF displays.
+
+#### Troubleshooting Checklist
+
+- RobotModel display is enabled and `Robot Description` is set to `robot_description`
+- `Fixed Frame` matches the URDF root link (e.g., `Pelvis`)
+- `ros2 pkg prefix gz_human_sim` resolves (ensure install/setup is sourced)
+- `/joint_states` is published (GUI sliders update values when `use_gui:=True`)
+- If using sim time, set `use_sim_time:=True` to keep time sources consistent
+
+#### Recommended Launch Example
+
+```bash
+$ ros2 launch gz_human_sim display_human.launch.py use_gui:=True use_sim_time:=False
+```
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 
@@ -137,6 +161,15 @@ $ ros2 launch gz_human_sim spawn_human.launch.py \
     model_name:=gz_human \
     human_model:=person_standing \
     x:=-2.0 y:=1.5 z:=0.0 yaw:=0.0
+```
+
+To use a custom human pose, set `human_model:=custom_human` and pass `human_pose:=...`. Available poses are defined in `config/human_pose_presets.yaml`.
+
+```bash
+$ ros2 launch gz_human_sim spawn_human.launch.py \
+  model_name:=gz_human \
+  human_model:=custom_human \
+  human_pose:=raise_right_hand
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -200,6 +233,7 @@ Main arguments of `spawn_human.launch.py`:
 | `device` | `keyboard`, `ps4`, `ps5`, `quest` |
 | `model_name` | Human entity name in Gazebo |
 | `human_model` | `person_standing` or `walking_actor` |
+| `human_pose` | Pose preset used when `custom_human` is selected. Defined in `config/human_pose_presets.yaml` |
 | `model_file` | Explicit SDF path. If set, it overrides `human_model` |
 | `x`, `y`, `z`, `yaw` | Spawn pose |
 

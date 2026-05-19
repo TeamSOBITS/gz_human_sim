@@ -109,12 +109,12 @@ def generate_launch_description():
     )
     declare_world_name_cmd = DeclareLaunchArgument(
         'world_name',
-        default_value='rcjo2025_arena_version_1',
+        default_value='rcjo2025_arena',
         description='Gazebo world name'
     )
     declare_enable_teleop_cmd = DeclareLaunchArgument(
         'enable_teleop',
-        default_value='true',
+        default_value='false',
         description='Launch human teleop stack together with the spawned human'
     )
     declare_device_cmd = DeclareLaunchArgument(
@@ -134,8 +134,8 @@ def generate_launch_description():
     )
     declare_human_pose_cmd = DeclareLaunchArgument(
         'human_pose',
-        default_value='raise_right_hand',
-        description='Custom human pose preset. Supported: raise_right_hand, raise_left_hand, raise_both_hands. Custom poses can be defined in human_pose_presets.yaml'
+        default_value='crouch',
+        description='Custom human pose preset. Supported: raise_right_hand, raise_left_hand, raise_both_hands, cross_arms, lie_down, sit_on_chair, point_right_hand, point_left_hand, crouch. Custom poses can be defined in human_pose_presets.yaml'
     )
     declare_model_file_cmd = DeclareLaunchArgument(
         'model_file',
