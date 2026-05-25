@@ -81,20 +81,17 @@ def create_model_directory(model_name, file_type):
 <?xml version="1.0"?>
 <sdf version="1.10">
   <model name="{model_name}">
-    <static>false</static>
-    <link name="link">
-      <pose>0 0 0 1.5708 0 0</pose>
+    <static>true</static>
+
+    <link name="base_link">
+      <pose>0 0 0 0 0 0</pose>
+    </link>
+
+    <link name="mesh_link">
+      <pose>0.0 3.0 0.7 1.5708 0 0</pose>
 
       <inertial>
-        <mass>1.0</mass>
-        <inertia>
-          <ixx>0.1</ixx>
-          <ixy>0.0</ixy>
-          <ixz>0.0</ixz>
-          <iyy>0.1</iyy>
-          <iyz>0.0</iyz>
-          <izz>0.1</izz>
-        </inertia>
+        <mass>100.0</mass>
       </inertial>
 
       <collision name="collision">
@@ -111,13 +108,20 @@ def create_model_directory(model_name, file_type):
             <uri>model://{model_name}/meshes/{model_name}.{file_type}</uri>
           </mesh>
         </geometry>
+
         <material>
           <diffuse>0.0 0.5 0.5 1.0</diffuse>
           <ambient>0.1 0.1 0.1 1.0</ambient>
         </material>
-      </visual>
 
+      </visual>
     </link>
+
+    <joint name="base_to_mesh_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>mesh_link</child>
+    </joint>
+
   </model>
 </sdf>
 """)
