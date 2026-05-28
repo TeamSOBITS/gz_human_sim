@@ -28,8 +28,10 @@ install(TARGETS
 )
 
 install(DIRECTORY
+  config
   launch
   models
+  scripts
   DESTINATION share/${PROJECT_NAME}
 )
 
