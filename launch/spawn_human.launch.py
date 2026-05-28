@@ -135,7 +135,11 @@ def generate_launch_description():
     declare_human_pose_cmd = DeclareLaunchArgument(
         'human_pose',
         default_value='raise_right_hand',
-        description='Custom human pose preset. Supported: raise_right_hand, raise_left_hand, raise_both_hands. Custom poses can be defined in human_pose_presets.yaml'
+        description=(
+            'Custom human pose preset. Supported: raise_right_hand, '
+            'raise_left_hand, raise_both_hands. '
+            'Custom poses can be defined in human_pose_presets.yaml'
+        )
     )
     declare_model_file_cmd = DeclareLaunchArgument(
         'model_file',

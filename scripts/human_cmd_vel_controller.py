@@ -81,7 +81,9 @@ class HumanCmdVelController(Node):
         try:
             response = future.result()
         except Exception as exc:
-            self.get_logger().warning(f"Failed to call set_pose for {self.model_name}: {exc}")
+            self.get_logger().warning(
+                f"Failed to call set_pose for {self.model_name}: {exc}"
+            )
             return
 
         if response is not None and response.success:
@@ -92,9 +94,15 @@ class HumanCmdVelController(Node):
             return
 
         if self.entity_ready:
-            self.get_logger().warning(f"Lost pose control for {self.model_name}; waiting for Gazebo entity again.")
+            self.get_logger().warning(
+                f"Lost pose control for {self.model_name}; "
+                "waiting for Gazebo entity again."
+            )
         elif self.wait_log_count < 5:
-            self.get_logger().info(f"Waiting for Gazebo entity {self.model_name} to appear before teleop starts.")
+            self.get_logger().info(
+                f"Waiting for Gazebo entity {self.model_name} "
+                "to appear before teleop starts."
+            )
             self.wait_log_count += 1
         self.entity_ready = False
 
