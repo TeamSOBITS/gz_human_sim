@@ -10,7 +10,6 @@ def generate_launch_description():
     rviz_config = LaunchConfiguration('rviz_config')
     use_sim_time = LaunchConfiguration('use_sim_time', default='False')
 
-    # 【変更点】パッケージ名とURDFのパスを人間モデル用に変更
     package_name = "gz_human_sim"
     urdf_relative_path = 'models/human_gazebo_raised_hand/humanSubjectWithMesh.urdf'
 
@@ -36,7 +35,6 @@ def generate_launch_description():
         description='Use simulation time if available'
     ))
 
-    # urdf_launch を使って人間モデルのURDFを読み込む
     ld.add_action(IncludeLaunchDescription(
         PathJoinSubstitution([FindPackageShare('urdf_launch'), 'launch', 'description.launch.py']),
         launch_arguments={
@@ -45,7 +43,6 @@ def generate_launch_description():
         }.items()
     ))
 
-    # GUIなし用のPublisher
     ld.add_action(Node(
         package='joint_state_publisher',
         executable='joint_state_publisher',
@@ -54,7 +51,6 @@ def generate_launch_description():
         condition=UnlessCondition(use_gui)
     ))
 
-    # GUIあり用のPublisher（スライダー画面）
     ld.add_action(Node(
         package='joint_state_publisher_gui',
         executable='joint_state_publisher_gui',
@@ -63,7 +59,6 @@ def generate_launch_description():
         condition=IfCondition(use_gui)
     ))
 
-    # RViz2の起動 (設定ファイルなしで起動し、手動で設定できるようにします)
     ld.add_action(Node(
         package='rviz2',
         executable='rviz2',
