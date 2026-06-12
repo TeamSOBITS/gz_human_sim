@@ -1,35 +1,33 @@
 """
-.glb や .obj 形式のオブジェクトを追加する際のスクリプトです。
-※ world に出現させるには、xacro ファイルに記述する必要があります。
-※ このスクリプトはあくまで models/ にテンプレートを作成するものです。
-※ モデルがないというエラーが出る場合は、colcon build をしていない場合が多いです。
+Script for adding objects in .glb or .obj format.
 
-使い方：
+Note: To display in a world, you need to write it in the xacro file.
+Note: This script only creates templates in the models/ directory.
+Note: If you get a "model not found" error, it's usually because you haven't run colcon build.
 
-pkg のルートに移動します。
+Usage:
+
+Navigate to the package root.
 
 ```sh
 cd ~/colcon_ws/src/sobits_gazebo_world
 ```
 
-3D モデルの形式によって以下のスクリプトを実行します。
+Run the following script depending on the 3D model format.
 
 ```sh
 python3 scripts/create_model_template.py <model-name> <obj | glb>
 ```
 
-実行例
+Example
 
 ```
-# chair を .obj 形式で使いたい場合
+# To use chair in .obj format
 python3 scripts/create_model_template.py chair obj
 
-# chair を .glb 形式で使いたい場合
+# To use chair in .glb format
 python3 scripts/create_model_template.py chair glb
 ```
-
-※ 今後 README に移行する予定です
-※ また、コメントアウトやプリント文の英語化も予定しています
 """
 import os
 import argparse
@@ -46,7 +44,7 @@ def create_model_directory(model_name, file_type):
     base_path = os.path.join("models", model_name)
 
     if os.path.exists(base_path):
-        raise FileExistsError(f"モデルディレクトリ '{base_path}' は既に存在します。")
+        raise FileExistsError(f"Model directory '{base_path}' already exists.")
 
     if "models" not in os.listdir():
         raise FileNotFoundError("No 'model' directory found. Your pwd might be wrong.")
@@ -125,10 +123,10 @@ def create_model_directory(model_name, file_type):
   </model>
 </sdf>
 """)
-        print(f"'{base_path}' のテンプレートを作成しました。以下の作業を行ってください。")
-        print(f"1. 'models/{model_name}/meshes' フォルダに {model_name}.{file_type} を配置（ファイル名注意）")
-        print("2. colcon build を実行")
-        print(f"xacro に記述する uri は <uri>model://{model_name}</uri> です")
+        print(f"Template for '{base_path}' created successfully. Please complete the following steps:")
+        print(f"1. Place {model_name}.{file_type} in 'models/{model_name}/meshes' folder (note the filename)")
+        print("2. Run colcon build")
+        print(f"The URI to write in xacro is <uri>model://{model_name}</uri>")
 
     except Exception as e:
         print(f"Error creating model directory: {e}")
