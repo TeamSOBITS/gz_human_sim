@@ -15,7 +15,8 @@ def set_fixed_joint_pose(sdf_text, joint_name, child_link_name, rpy):
         raise RuntimeError(f"Failed to convert joint '{joint_name}' to fixed.")
 
     pose_pattern = (
-        rf"(<link name='{re.escape(child_link_name)}'>\s+<pose relative_to='{re.escape(joint_name)}'>)"
+        rf"(<link name='{re.escape(child_link_name)}'>\s+"
+        rf"<pose relative_to='{re.escape(joint_name)}'>)"
         r"[^<]+"
         r"(</pose>)"
     )
