@@ -1,0 +1,44 @@
+
+<?xml version="1.0"?>
+<sdf version="1.10">
+  <model name="raise_right_hand_medium">
+    <static>true</static>
+
+    <link name="base_link">
+      <pose>0 0 0 0 0 0</pose>
+    </link>
+
+    <link name="mesh_link">
+      <pose>0.0 3.0 0.7 1.5708 0 0</pose>
+
+            <inertial>
+        <mass>1.0</mass>
+      </inertial>
+
+      <collision name="collision">
+        <geometry>
+          <mesh>
+            <uri>model://raise_right_hand_medium/meshes/raise_right_hand_medium.glb</uri>
+          </mesh>
+        </geometry>
+      </collision>
+
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>model://raise_right_hand_medium/meshes/raise_right_hand_medium.glb</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <diffuse>0.0 0.5 0.5 1.0</diffuse>
+          <ambient>0.1 0.1 0.1 1.0</ambient>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="base_to_mesh_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>mesh_link</child>
+    </joint>
+  </model>
+</sdf>

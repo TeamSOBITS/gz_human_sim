@@ -1,0 +1,865 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 70
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /RobotModel1
+      Splitter Ratio: 0.5
+    Tree Height: 328
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Expanded: ~
+    Name: Tool Properties
+    Splitter Ratio: 0.5
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        BicBrac_LFA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        BicBrac_LUA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        BicBrac_RFA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        BicBrac_RUA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        BicFem_LLL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        BicFem_LUL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        BicFem_RLL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        BicFem_RUL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        ErSpin_LP:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        ErSpin_LUT:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        ErSpin_RP:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        ErSpin_RUT:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        ExtCarp_LFA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        ExtCarp_LH:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        ExtCarp_RFA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        ExtCarp_RH:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        FlexCarp_LFA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        FlexCarp_LH:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        FlexCarp_RFA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        FlexCarp_RH:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        GasLat_LF:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        GasLat_LUL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        GasLat_RF:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        GasLat_RUL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        GasMed_LF:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        GasMed_LUL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        GasMed_RF:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        GasMed_RUL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        Head:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        Head_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        LeftFTSensor:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftFoot:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftFoot_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        LeftFoot_f2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        LeftForeArm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftForeArm_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        LeftHand:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftHandCOM:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftHand_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        LeftLowerLeg:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftLowerLeg_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        LeftShoulder:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftShoulder_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        LeftShoulder_f2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        LeftToe:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftUpperArm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftUpperLeg:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LeftUpperLeg_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        LeftUpperLeg_f2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        Link Tree Style: Links in Alphabetic Order
+        LowerTrunk:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        LowerTrunk_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        Neck:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        Neck_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        Neck_f2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        Pelvis:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RecAbd_LP:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RecAbd_LUT:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RecAbd_RP:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RecAbd_RUT:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RecFem_LLL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RecFem_LLT:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RecFem_RLL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RecFem_RLT:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RightFTSensor:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightFoot:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightFoot_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RightFoot_f2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RightForeArm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightForeArm_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RightHand:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightHandCOM:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightHand_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RightLowerLeg:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightLowerLeg_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RightShoulder:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightShoulder_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RightShoulder_f2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RightToe:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightUpperArm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightUpperLeg:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RightUpperLeg_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        RightUpperLeg_f2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        TibAnt_LF:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        TibAnt_LLL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        TibAnt_RF:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        TibAnt_RLL:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        TricBrac_LFA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        TricBrac_LUA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        TricBrac_RFA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        TricBrac_RUA:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        UpperTrunk:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        UpperTrunk_f1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        UpperTrunk_f2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+      Mass Properties:
+        Inertia: false
+        Mass: false
+      Name: RobotModel
+      TF Prefix: ""
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+        BicBrac_LFA:
+          Value: true
+        BicBrac_LUA:
+          Value: true
+        BicBrac_RFA:
+          Value: true
+        BicBrac_RUA:
+          Value: true
+        BicFem_LLL:
+          Value: true
+        BicFem_LUL:
+          Value: true
+        BicFem_RLL:
+          Value: true
+        BicFem_RUL:
+          Value: true
+        ErSpin_LP:
+          Value: true
+        ErSpin_LUT:
+          Value: true
+        ErSpin_RP:
+          Value: true
+        ErSpin_RUT:
+          Value: true
+        ExtCarp_LFA:
+          Value: true
+        ExtCarp_LH:
+          Value: true
+        ExtCarp_RFA:
+          Value: true
+        ExtCarp_RH:
+          Value: true
+        FlexCarp_LFA:
+          Value: true
+        FlexCarp_LH:
+          Value: true
+        FlexCarp_RFA:
+          Value: true
+        FlexCarp_RH:
+          Value: true
+        GasLat_LF:
+          Value: true
+        GasLat_LUL:
+          Value: true
+        GasLat_RF:
+          Value: true
+        GasLat_RUL:
+          Value: true
+        GasMed_LF:
+          Value: true
+        GasMed_LUL:
+          Value: true
+        GasMed_RF:
+          Value: true
+        GasMed_RUL:
+          Value: true
+        Head:
+          Value: true
+        Head_f1:
+          Value: true
+        LeftFTSensor:
+          Value: true
+        LeftFoot:
+          Value: true
+        LeftFoot_f1:
+          Value: true
+        LeftFoot_f2:
+          Value: true
+        LeftForeArm:
+          Value: true
+        LeftForeArm_f1:
+          Value: true
+        LeftHand:
+          Value: true
+        LeftHandCOM:
+          Value: true
+        LeftHand_f1:
+          Value: true
+        LeftLowerLeg:
+          Value: true
+        LeftLowerLeg_f1:
+          Value: true
+        LeftShoulder:
+          Value: true
+        LeftShoulder_f1:
+          Value: true
+        LeftShoulder_f2:
+          Value: true
+        LeftToe:
+          Value: true
+        LeftUpperArm:
+          Value: true
+        LeftUpperLeg:
+          Value: true
+        LeftUpperLeg_f1:
+          Value: true
+        LeftUpperLeg_f2:
+          Value: true
+        LowerTrunk:
+          Value: true
+        LowerTrunk_f1:
+          Value: true
+        Neck:
+          Value: true
+        Neck_f1:
+          Value: true
+        Neck_f2:
+          Value: true
+        Pelvis:
+          Value: true
+        RecAbd_LP:
+          Value: true
+        RecAbd_LUT:
+          Value: true
+        RecAbd_RP:
+          Value: true
+        RecAbd_RUT:
+          Value: true
+        RecFem_LLL:
+          Value: true
+        RecFem_LLT:
+          Value: true
+        RecFem_RLL:
+          Value: true
+        RecFem_RLT:
+          Value: true
+        RightFTSensor:
+          Value: true
+        RightFoot:
+          Value: true
+        RightFoot_f1:
+          Value: true
+        RightFoot_f2:
+          Value: true
+        RightForeArm:
+          Value: true
+        RightForeArm_f1:
+          Value: true
+        RightHand:
+          Value: true
+        RightHandCOM:
+          Value: true
+        RightHand_f1:
+          Value: true
+        RightLowerLeg:
+          Value: true
+        RightLowerLeg_f1:
+          Value: true
+        RightShoulder:
+          Value: true
+        RightShoulder_f1:
+          Value: true
+        RightShoulder_f2:
+          Value: true
+        RightToe:
+          Value: true
+        RightUpperArm:
+          Value: true
+        RightUpperLeg:
+          Value: true
+        RightUpperLeg_f1:
+          Value: true
+        RightUpperLeg_f2:
+          Value: true
+        TibAnt_LF:
+          Value: true
+        TibAnt_LLL:
+          Value: true
+        TibAnt_RF:
+          Value: true
+        TibAnt_RLL:
+          Value: true
+        TricBrac_LFA:
+          Value: true
+        TricBrac_LUA:
+          Value: true
+        TricBrac_RFA:
+          Value: true
+        TricBrac_RUA:
+          Value: true
+        UpperTrunk:
+          Value: true
+        UpperTrunk_f1:
+          Value: true
+        UpperTrunk_f2:
+          Value: true
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: false
+      Tree:
+        Pelvis:
+          ErSpin_LP:
+            {}
+          ErSpin_RP:
+            {}
+          LeftUpperLeg_f1:
+            LeftUpperLeg_f2:
+              LeftUpperLeg:
+                BicFem_LUL:
+                  {}
+                GasLat_LUL:
+                  {}
+                GasMed_LUL:
+                  {}
+                LeftLowerLeg_f1:
+                  LeftLowerLeg:
+                    BicFem_LLL:
+                      {}
+                    LeftFoot_f1:
+                      LeftFoot_f2:
+                        LeftFoot:
+                          GasLat_LF:
+                            {}
+                          GasMed_LF:
+                            {}
+                          LeftFTSensor:
+                            {}
+                          LeftToe:
+                            {}
+                          TibAnt_LF:
+                            {}
+                    RecFem_LLL:
+                      {}
+                    TibAnt_LLL:
+                      {}
+          LowerTrunk_f1:
+            LowerTrunk:
+              UpperTrunk_f1:
+                UpperTrunk_f2:
+                  UpperTrunk:
+                    ErSpin_LUT:
+                      {}
+                    ErSpin_RUT:
+                      {}
+                    LeftShoulder:
+                      LeftShoulder_f1:
+                        LeftShoulder_f2:
+                          LeftUpperArm:
+                            BicBrac_LUA:
+                              {}
+                            LeftForeArm_f1:
+                              LeftForeArm:
+                                BicBrac_LFA:
+                                  {}
+                                ExtCarp_LFA:
+                                  {}
+                                FlexCarp_LFA:
+                                  {}
+                                LeftHand_f1:
+                                  LeftHand:
+                                    ExtCarp_LH:
+                                      {}
+                                    FlexCarp_LH:
+                                      {}
+                                    LeftHandCOM:
+                                      {}
+                                TricBrac_LFA:
+                                  {}
+                            TricBrac_LUA:
+                              {}
+                    Neck_f1:
+                      Neck_f2:
+                        Neck:
+                          Head_f1:
+                            Head:
+                              {}
+                    RecAbd_LUT:
+                      {}
+                    RecAbd_RUT:
+                      {}
+                    RightShoulder:
+                      RightShoulder_f1:
+                        RightShoulder_f2:
+                          RightUpperArm:
+                            BicBrac_RUA:
+                              {}
+                            RightForeArm_f1:
+                              RightForeArm:
+                                BicBrac_RFA:
+                                  {}
+                                ExtCarp_RFA:
+                                  {}
+                                FlexCarp_RFA:
+                                  {}
+                                RightHand_f1:
+                                  RightHand:
+                                    ExtCarp_RH:
+                                      {}
+                                    FlexCarp_RH:
+                                      {}
+                                    RightHandCOM:
+                                      {}
+                                TricBrac_RFA:
+                                  {}
+                            TricBrac_RUA:
+                              {}
+          RecAbd_LP:
+            {}
+          RecAbd_RP:
+            {}
+          RecFem_LLT:
+            {}
+          RecFem_RLT:
+            {}
+          RightUpperLeg_f1:
+            RightUpperLeg_f2:
+              RightUpperLeg:
+                BicFem_RUL:
+                  {}
+                GasLat_RUL:
+                  {}
+                GasMed_RUL:
+                  {}
+                RightLowerLeg_f1:
+                  RightLowerLeg:
+                    BicFem_RLL:
+                      {}
+                    RecFem_RLL:
+                      {}
+                    RightFoot_f1:
+                      RightFoot_f2:
+                        RightFoot:
+                          GasLat_RF:
+                            {}
+                          GasMed_RF:
+                            {}
+                          RightFTSensor:
+                            {}
+                          RightToe:
+                            {}
+                          TibAnt_RF:
+                            {}
+                    TibAnt_RLL:
+                      {}
+      Update Interval: 0
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: Pelvis
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: goal_pose
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 3.8771517276763916
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0.7132912278175354
+        Y: 0.23968662321567535
+        Z: 0.3036670684814453
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.5450001358985901
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz_default_plugins)
+      Yaw: 6.258183479309082
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 932
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001980000034afc0200000004fb000000100044006900730070006c006100790073010000003d000001cb000000c900fffffffb0000001200530065006c0065006300740069006f006e0000000171000000890000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000001b0000000a50000005c00fffffffb0000000a00560069006500770073010000020e00000179000000a400ffffff0000046c0000034a00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Selection:
+    collapsed: false
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1546
+  X: 230
+  Y: 200
