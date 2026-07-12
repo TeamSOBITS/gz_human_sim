@@ -8,7 +8,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
 	declare_world_name_cmd = DeclareLaunchArgument(
 		'world_name',
-		default_value='rcjo2026_arena',
+		default_value='rcjo2025',
 		description='Gazebo world name'
 	)
 	declare_model_name_cmd = DeclareLaunchArgument(

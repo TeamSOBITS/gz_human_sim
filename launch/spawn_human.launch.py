@@ -2,7 +2,7 @@ import importlib.util
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import AppendEnvironmentVariable, DeclareLaunchArgument, IncludeLaunchDescription
 from launch.actions import OpaqueFunction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -33,6 +33,12 @@ def _generate_custom_human_model(context):
     return human_model_utils.generate_custom_human_model(package_share, human_pose)
 
 
+def _resolve_walking_actor_model(context):
+    package_share = FindPackageShare('gz_human_sim').perform(context)
+    human_model_utils = _load_human_model_utils(context)
+    return human_model_utils.resolve_walking_actor_model(package_share)
+
+
 def _spawn_human_cmd(context, *_args, **_kwargs):
     namespace = LaunchConfiguration('namespace').perform(context)
     world_name = LaunchConfiguration('world_name').perform(context)
@@ -52,18 +58,18 @@ def _spawn_human_cmd(context, *_args, **_kwargs):
             'model.sdf',
         ]
     ).perform(context)
-    walking_model_file = PathJoinSubstitution(
-        [
-            FindPackageShare('gz_human_sim'),
-            'models',
-            'walking_actor.sdf',
-        ]
-    ).perform(context)
     if not model_file:
         if human_model == 'person_standing':
             model_file = standing_model_file
         elif human_model == 'walking_actor':
-            model_file = walking_model_file
+            # gzserver is normally already running by the time this launch
+            # file executes (started separately, e.g. by sobit_edu's
+            # gz_minimal.launch.py), so GZ_SIM_RESOURCE_PATH set here can't
+            # help it resolve model://walking_actor/meshes/... URIs. Instead,
+            # generate a copy of models/walking_actor/model.sdf with those
+            # URIs already baked into absolute paths (same trick used for
+            # custom_human below).
+            model_file = _resolve_walking_actor_model(context)
         elif human_model == 'custom_human':
             model_file = _generate_custom_human_model(context)
         else:
@@ -109,12 +115,12 @@ def generate_launch_description():
     )
     declare_world_name_cmd = DeclareLaunchArgument(
         'world_name',
-        default_value='rcjo2026_arena',
+        default_value='rcjo2025_arena', # rcjo2025_arena, empty, wrs2020, small_house
         description='Gazebo world name'
     )
     declare_enable_teleop_cmd = DeclareLaunchArgument(
         'enable_teleop',
-        default_value='false',
+        default_value='true',
         description='Launch human teleop stack together with the spawned human'
     )
     declare_device_cmd = DeclareLaunchArgument(
@@ -129,7 +135,7 @@ def generate_launch_description():
     )
     declare_human_model_cmd = DeclareLaunchArgument(
         'human_model',
-        default_value='custom_human',
+        default_value='person_standing',
         description='Human model preset: person_standing, walking_actor, or custom_human'
     )
     declare_human_pose_cmd = DeclareLaunchArgument(
@@ -172,6 +178,22 @@ def generate_launch_description():
     y = LaunchConfiguration('y')
     z = LaunchConfiguration('z')
     yaw = LaunchConfiguration('yaw')
+
+    # Make sure Gazebo can resolve model:// URIs (meshes, nested models, etc.)
+    # for the models shipped with this package and with sobits_gazebo_worlds.
+    # Without this, spawning succeeds (the .sdf/.config file itself is found
+    # via the absolute path we pass with -file) but any model://<name>/...
+    # reference *inside* that file - e.g. the actor's mesh URIs like
+    # model://walking_actor/meshes/walk.dae - fails to resolve, which is
+    # exactly the "Unable to find file with URI" error being seen.
+    set_gz_resource_path_human = AppendEnvironmentVariable(
+        'GZ_SIM_RESOURCE_PATH',
+        PathJoinSubstitution([FindPackageShare('gz_human_sim'), 'models']),
+    )
+    set_gz_resource_path_worlds = AppendEnvironmentVariable(
+        'GZ_SIM_RESOURCE_PATH',
+        PathJoinSubstitution([FindPackageShare('sobits_gazebo_worlds'), 'models']),
+    )
 
     # Bridge Gazebo set_pose service
     human_set_pose_bridge = Node(
@@ -225,6 +247,8 @@ def generate_launch_description():
         declare_y_cmd,
         declare_z_cmd,
         declare_yaw_cmd,
+        set_gz_resource_path_human,
+        set_gz_resource_path_worlds,
         human_set_pose_bridge,
         OpaqueFunction(function=_spawn_human_cmd),
         human_teleop,

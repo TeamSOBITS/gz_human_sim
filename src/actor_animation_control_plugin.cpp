@@ -39,6 +39,7 @@ class ActorAnimationControlPlugin
       this->angularThreshold = _sdf->Get<double>("angular_threshold");
 
     this->actor.SetAnimationName(_ecm, this->animationName);
+    this->lastAppliedAnimationName = this->animationName;
     this->actor.SetAnimationTime(_ecm, this->animationTime);
   }
 
@@ -49,7 +50,18 @@ class ActorAnimationControlPlugin
     if (_info.paused)
       return;
 
-    this->actor.SetAnimationName(_ecm, this->animationName);
+    // Only push the AnimationName component when it actually changes.
+    // gz-sim rebuilds the render-thread PoseAnimation whenever this
+    // component is written, even if the value is unchanged. Calling this
+    // every PreUpdate tick (i.e. at physics rate) causes the animation to be
+    // rebuilt out from under the render/sensor render threads while they are
+    // mid-interpolation, which manifests as a segfault inside
+    // gz::common::Animation::Time() / PoseAnimation::InterpolatedKeyFrame().
+    if (this->animationName != this->lastAppliedAnimationName)
+    {
+      this->actor.SetAnimationName(_ecm, this->animationName);
+      this->lastAppliedAnimationName = this->animationName;
+    }
 
     if (this->movingLastStep)
     {
@@ -93,6 +105,7 @@ class ActorAnimationControlPlugin
   private: gz::sim::Entity entity{gz::sim::kNullEntity};
   private: gz::sim::Actor actor;
   private: std::string animationName{"walk"};
+  private: std::string lastAppliedAnimationName;
   private: double playbackSpeed{1.0};
   private: double linearThreshold{1e-4};
   private: double angularThreshold{1e-4};

@@ -10,11 +10,11 @@
       <angular_threshold>0.0001</angular_threshold>
     </plugin>
     <skin>
-      <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
+      <filename>model://walking_actor/meshes/walk.dae</filename>
       <scale>1.0</scale>
     </skin>
     <animation name="walk">
-      <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
+      <filename>model://walking_actor/meshes/walk.dae</filename>
       <interpolate_x>false</interpolate_x>
     </animation>
   </actor>

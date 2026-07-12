@@ -8,6 +8,44 @@ import yaml
 CUSTOM_HUMAN_Z_OFFSET = 0.9673
 
 
+def resolve_walking_actor_model(package_share):
+    """Return a path to a walking_actor model.sdf with model:// mesh URIs
+    baked into absolute paths.
+
+    gzserver is typically already running (started by an outer launch file,
+    e.g. sobit_edu's gz_minimal.launch.py) by the time this package's
+    spawn_human.launch.py runs. Setting GZ_SIM_RESOURCE_PATH from within
+    spawn_human.launch.py only affects processes it spawns itself, not the
+    already-running gzserver/gzclient, so model://walking_actor/... URIs
+    inside the actor's own model.sdf never get resolved by the server.
+    Rewriting them to absolute paths sidesteps resource-path resolution
+    entirely, the same way generate_custom_human_model() already does.
+    """
+    model_dir = os.path.join(package_share, 'models', 'walking_actor')
+    mesh_dir = os.path.join(model_dir, 'meshes')
+    source_sdf = os.path.join(model_dir, 'model.sdf')
+
+    with open(source_sdf, 'r', encoding='utf-8') as sdf_file:
+        sdf_text = sdf_file.read()
+
+    resolved_text, count = re.subn(
+        r'model://walking_actor/meshes/', f'{mesh_dir}/', sdf_text
+    )
+    if count == 0:
+        raise RuntimeError(
+            f"No 'model://walking_actor/meshes/' URIs found in {source_sdf}. "
+            "Check that the file wasn't changed to a different URI style."
+        )
+
+    cache_dir = os.path.join(tempfile.gettempdir(), 'gz_human_sim')
+    os.makedirs(cache_dir, exist_ok=True)
+    generated_sdf = os.path.join(cache_dir, 'walking_actor_resolved.sdf')
+    with open(generated_sdf, 'w', encoding='utf-8') as sdf_file:
+        sdf_file.write(resolved_text)
+
+    return generated_sdf
+
+
 def set_fixed_joint_pose(sdf_text, joint_name, child_link_name, rpy):
     joint_pattern = rf"(<joint name='{re.escape(joint_name)}' type=)'[^']+('>)"
     sdf_text, joint_count = re.subn(joint_pattern, r"\1'fixed\2", sdf_text, count=1)
