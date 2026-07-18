@@ -68,3 +68,31 @@ theta_next = theta + omega_z dt
 - Actor が動かない場合は、`ros2 topic echo /<namespace>/cmd_vel` で指令を確認し、bridge のログにエラーがないことを確認します。
 - mesh の URI エラーが出る場合は、`gz_human_sim` を再ビルド・source してから起動します。
 - 複数 Actor が同時に動く場合は、各起動で異なる `namespace` を指定してください。
+
+
+## walking_actorの起動例
+
+出現:
+```bash
+ros2 launch gz_human_sim spawn_human.launch.py \
+  human_model:=walking_actor \
+  model_name:=walker \
+  enable_teleop:=false
+```
+
+
+移動指令:
+```bash
+ros2 topic pub --rate 10 /cmd_vel geometry_msgs/msg/Twist \
+  '{linear: {x: 0.5, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}'
+```
+停止:
+```bash
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+  '{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}'
+```
+なお、Gazebo Transport へ直接送る場合、この環境では -r は使えません。正しい単発コマンドは次
+```bash
+gz topic -t /cmd_vel -m gz.msgs.Twist -p 'linear { x: 0.5 }'
+この単発指令でも Actor は継続して前進する実装です。
+```
