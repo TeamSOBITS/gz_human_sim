@@ -1,13 +1,16 @@
 <?xml version="1.0" ?>
 <sdf version="1.9">
   <actor name="walking_actor">
+    <pose>0 0 0.86 0 0 0</pose>
     <plugin
-      filename="libgz_human_actor_animation_control.so"
-      name="gz_human_sim::ActorAnimationControlPlugin">
+      filename="libgz_human_actor_command.so"
+      name="gz_human_sim::ActorCommandPlugin">
+      <vel_topic>/cmd_vel</vel_topic>
+      <path_topic>/cmd_path</path_topic>
       <animation_name>walk</animation_name>
-      <playback_speed>1.0</playback_speed>
-      <linear_threshold>0.0001</linear_threshold>
-      <angular_threshold>0.0001</angular_threshold>
+      <animation_factor>4.0</animation_factor>
+      <linear_velocity>1.0</linear_velocity>
+      <linear_tolerance>0.1</linear_tolerance>
     </plugin>
     <skin>
       <filename>model://walking_actor/meshes/walk.dae</filename>

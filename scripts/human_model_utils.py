@@ -8,7 +8,7 @@ import yaml
 CUSTOM_HUMAN_Z_OFFSET = 0.9673
 
 
-def resolve_walking_actor_model(package_share):
+def resolve_walking_actor_model(package_share, velocity_topic, path_topic):
     """Return a path to a walking_actor model.sdf with model:// mesh URIs
     baked into absolute paths.
 
@@ -23,6 +23,12 @@ def resolve_walking_actor_model(package_share):
     """
     model_dir = os.path.join(package_share, 'models', 'walking_actor')
     mesh_dir = os.path.join(model_dir, 'meshes')
+    package_prefix = os.path.dirname(os.path.dirname(package_share))
+    plugin_library = os.path.join(
+        package_prefix, 'lib', 'libgz_human_actor_command.so'
+    )
+    if not os.path.isfile(plugin_library):
+        raise RuntimeError(f'Actor command plugin not found: {plugin_library}')
     source_sdf = os.path.join(model_dir, 'model.sdf')
 
     with open(source_sdf, 'r', encoding='utf-8') as sdf_file:
@@ -31,6 +37,13 @@ def resolve_walking_actor_model(package_share):
     resolved_text, count = re.subn(
         r'model://walking_actor/meshes/', f'{mesh_dir}/', sdf_text
     )
+    resolved_text = resolved_text.replace(
+        'filename="libgz_human_actor_command.so"',
+        f'filename="{plugin_library}"',
+        1,
+    )
+    resolved_text = resolved_text.replace("<vel_topic>/cmd_vel</vel_topic>", f"<vel_topic>{velocity_topic}</vel_topic>", 1)
+    resolved_text = resolved_text.replace("<path_topic>/cmd_path</path_topic>", f"<path_topic>{path_topic}</path_topic>", 1)
     if count == 0:
         raise RuntimeError(
             f"No 'model://walking_actor/meshes/' URIs found in {source_sdf}. "
@@ -39,7 +52,8 @@ def resolve_walking_actor_model(package_share):
 
     cache_dir = os.path.join(tempfile.gettempdir(), 'gz_human_sim')
     os.makedirs(cache_dir, exist_ok=True)
-    generated_sdf = os.path.join(cache_dir, 'walking_actor_resolved.sdf')
+    topic_key = re.sub(r'[^A-Za-z0-9_.-]', '_', velocity_topic)
+    generated_sdf = os.path.join(cache_dir, f'walking_actor_{topic_key}.sdf')
     with open(generated_sdf, 'w', encoding='utf-8') as sdf_file:
         sdf_file.write(resolved_text)
 
@@ -101,6 +115,12 @@ def generate_custom_human_model(package_share, human_pose):
 
     model_dir = os.path.join(package_share, 'models', 'human_gazebo_raised_hand')
     mesh_dir = os.path.join(model_dir, 'meshes')
+    package_prefix = os.path.dirname(os.path.dirname(package_share))
+    plugin_library = os.path.join(
+        package_prefix, 'lib', 'libgz_human_actor_command.so'
+    )
+    if not os.path.isfile(plugin_library):
+        raise RuntimeError(f'Actor command plugin not found: {plugin_library}')
     source_urdf = os.path.join(model_dir, 'humanSubjectWithMesh.urdf')
 
     cache_dir = os.path.join(tempfile.gettempdir(), 'gz_human_sim')

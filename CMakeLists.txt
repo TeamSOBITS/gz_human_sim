@@ -8,6 +8,8 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(gz-plugin2 REQUIRED)
 find_package(gz-sim8 REQUIRED)
+find_package(gz-msgs10 REQUIRED)
+find_package(gz-transport13 REQUIRED)
 
 add_library(gz_human_actor_animation_control SHARED
   src/actor_animation_control_plugin.cpp
@@ -17,6 +19,16 @@ target_link_libraries(gz_human_actor_animation_control
   gz-sim8::gz-sim8
 )
 
+add_library(gz_human_actor_command SHARED
+  src/actor_command_plugin.cpp
+)
+target_link_libraries(gz_human_actor_command
+  gz-plugin2::gz-plugin2
+  gz-sim8::gz-sim8
+  gz-msgs10::gz-msgs10
+  gz-transport13::gz-transport13
+)
+
 install(PROGRAMS
   scripts/human_cmd_vel_controller.py
   DESTINATION lib/${PROJECT_NAME}
@@ -24,6 +36,7 @@ install(PROGRAMS
 
 install(TARGETS
   gz_human_actor_animation_control
+  gz_human_actor_command
   DESTINATION lib
 )
 
