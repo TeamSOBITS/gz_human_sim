@@ -1,0 +1,1214 @@
+#include "HumanControlPanel.hh"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <csignal>
+#include <dlfcn.h>
+#include <fstream>
+#include <regex>
+#include <utility>
+#include <vector>
+
+#include <QGuiApplication>
+#include <QKeyEvent>
+#include <QPointer>
+#include <QTimer>
+
+#include <gz/gui/Application.hh>
+#include <gz/gui/GuiEvents.hh>
+#include <gz/gui/MainWindow.hh>
+#include <gz/msgs/boolean.pb.h>
+#include <gz/msgs/empty.pb.h>
+#include <gz/msgs/entity.pb.h>
+#include <gz/msgs/pose_v.pb.h>
+#include <gz/msgs/serialized_map.pb.h>
+#include <gz/msgs/stringmsg.pb.h>
+#include <gz/msgs/stringmsg_v.pb.h>
+#include <gz/msgs/twist.pb.h>
+#include <gz/plugin/Register.hh>
+#include <gz/rendering/Camera.hh>
+#include <gz/rendering/RenderingIface.hh>
+#include <gz/rendering/Scene.hh>
+
+namespace gz_human_sim
+{
+// Index order backs both the QML ComboBox and defaultName()/isCustomHuman().
+// person_walking (formerly here) was dropped: it's the same "Mingfei"
+// generic-actor mesh as walking_actor (compare model.config authorship),
+// just fetched at spawn time from a remote Fuel URL instead of the copy
+// walking_actor already vendors locally, and with no ActorCommandPlugin of
+// its own -- a strictly worse duplicate of walking_actor, not a second
+// distinct avatar.
+static const char *const kHumanModels[] = {
+  "walking_actor", "DoctorFemaleWalk",
+  "person_standing", "custom_human",
+};
+static const char *const kHumanModelDescriptions[] = {
+  "汎用の歩行アクター。矢印パッド/キーボードで移動可",
+  "女性医師の歩行スキン。矢印パッド/キーボードで移動可",
+  "静止した立ち姿。移動不可",
+  "ポーズ指定できる静止人物。移動不可",
+};
+// Suggested spawn Z per model, shown as the QML spawn form's default when
+// that model is selected. DoctorFemaleWalk's own model.sdf already poses
+// the actor at z=0 (its mesh origin sits at ground level, unlike
+// walking_actor's, which needs the +0.86 the other three models default
+// to) -- keep in sync with kHumanModels above.
+static const double kHumanModelDefaultZ[] = {
+  1.0, 0.0, 1.0, 1.0,
+};
+static constexpr int kHumanModelCount =
+    static_cast<int>(sizeof(kHumanModels) / sizeof(kHumanModels[0]));
+static constexpr int kCustomHumanIndex = 3;
+
+// Raw ActorCommandPlugin follow_mode values the GUI exposes, index-matched
+// with FollowModeLabels()'s QML-facing Japanese labels. "velocity" (ignore
+// any cmd_path, teleop-only) is deliberately left out here -- it's nearly
+// indistinguishable from "auto" for anyone who never sends this human a
+// path, so it only added a confusing third choice. It's still available at
+// the launch-argument level (`ros2 launch gz_human_sim spawn_human.launch.py
+// follow_mode:=velocity ...`) for the rare case that actually wants it.
+static const char *const kFollowModeValues[] = {"auto", "path"};
+static constexpr int kFollowModeCount =
+    static_cast<int>(sizeof(kFollowModeValues) / sizeof(kFollowModeValues[0]));
+
+// Path templates sendPathTemplate() can generate, index-matched with
+// PathTemplateLabels(); keep this in sync with scripts/path_template.py's
+// --shape choices (that script is the standalone-CLI version of the same
+// shapes; this one publishes straight to gz-transport for the GUI button
+// instead of going through ROS + a subprocess).
+enum PathTemplateIndex
+{
+  kPathTemplateCircle = 0,
+  kPathTemplateSquare,
+  kPathTemplateCount,
+};
+static const char *const kPathTemplateLabels[kPathTemplateCount] = {"円", "四角"};
+
+// Spawn position auto-offset: fans consecutive default-position spawns out
+// in a grid instead of stacking them on top of each other at (0, 0).
+static constexpr double kSpawnGridSpacing = 1.2;
+static constexpr int kSpawnGridColumns = 4;
+
+// Entity-existence polling: gz-sim's create/remove services ack the
+// request, not the outcome, so spawn/removal are confirmed by polling
+// /world/<w>/state instead of trusting the ack. 20 * 500ms = 10s.
+static constexpr int kEntityPollIntervalMs = 500;
+static constexpr int kEntityPollMaxAttempts = 20;
+static constexpr unsigned int kStateQueryTimeoutMs = 800u;
+
+static bool IsActorIndex(int _index)
+{
+  // walking_actor, DoctorFemaleWalk -- keep in sync with kHumanModels above.
+  return _index >= 0 && _index < 2;
+}
+
+// QWEASDZXC 9-key movement layout (Q W E / A S D / Z X C, S = stop), shared
+// by the on-screen pad and the keyboard shortcuts in eventFilter(). Diagonal
+// components are scaled by 1/sqrt(2) so diagonal moves aren't faster than
+// straight ones. X is the odd one out: rather than a pure backward strafe
+// (which would moonwalk the actor away without it ever turning around), it
+// combines backward motion with a turn rate so the actor visibly spins to
+// face the direction it's retreating toward -- but only when _turnToFace
+// is requested (Shift+key); a plain key press is always a pure strafe,
+// including X (straight-back strafe, i.e. moonwalking), same as the other
+// 7 directions.
+static constexpr double kTeleopSpeed = 1.0;
+static constexpr double kTeleopDiagonal = kTeleopSpeed * 0.70710678;
+static constexpr double kTeleopTurnRate = 2.5;
+
+// Every entry's (linear, lateral) magnitude is kTeleopSpeed by construction
+// (cardinal directions put it all on one axis; diagonals split it
+// kTeleopDiagonal/kTeleopDiagonal, which is kTeleopSpeed/sqrt(2) per axis,
+// i.e. kTeleopSpeed once recombined) -- teleopDirection()'s _turnToFace
+// path relies on that to reuse this table for "how far to turn, then walk
+// forward at this same speed" instead of a separate direction-angle table.
+static bool DirectionToTwist(
+    const std::string &_direction, double &_linear, double &_lateral,
+    double &_angular)
+{
+  _linear = 0.0;
+  _lateral = 0.0;
+  _angular = 0.0;
+  if (_direction == "W") { _linear = kTeleopSpeed; }
+  else if (_direction == "A") { _lateral = kTeleopSpeed; }
+  else if (_direction == "D") { _lateral = -kTeleopSpeed; }
+  else if (_direction == "X") { _linear = -kTeleopSpeed; }
+  else if (_direction == "Q") { _linear = kTeleopDiagonal; _lateral = kTeleopDiagonal; }
+  else if (_direction == "E") { _linear = kTeleopDiagonal; _lateral = -kTeleopDiagonal; }
+  else if (_direction == "Z") { _linear = -kTeleopDiagonal; _lateral = kTeleopDiagonal; }
+  else if (_direction == "C") { _linear = -kTeleopDiagonal; _lateral = -kTeleopDiagonal; }
+  else if (_direction == "S") { /* stop: all-zero */ }
+  else { return false; }
+  return true;
+}
+
+// Keyboard shortcuts only fire when focus isn't on a text-editable QML item
+// (name field, x/y/z/yaw fields, ...) -- otherwise typing "human1" into the
+// name box would also drive the active human around.
+static bool IsTextEditFocused()
+{
+  auto *focusObject = qGuiApp ? qGuiApp->focusObject() : nullptr;
+  if (!focusObject)
+    return false;
+  const QString className = focusObject->metaObject()->className();
+  return className.contains("TextInput") || className.contains("TextEdit");
+}
+
+// Keep in sync with setViewpoint()'s switch below and the QML ComboBox.
+enum ViewIndex
+{
+  kViewFree = 0,
+  kViewFirstPerson,
+  kViewBehind,
+  kViewFront,
+  kViewRight,
+  kViewLeft,
+  kViewTop,
+  kViewFrontRightUp,
+  kViewFrontLeftUp,
+  kViewCount,
+};
+static const char *const kViewpointLabels[kViewCount] = {
+  "自由視点", "一人称（本人視点）", "後方追従", "前方から", "右横から", "左横から",
+  "俯瞰（真上）", "右奥上から（斜め上）", "左奥上から（斜め上）",
+};
+// Eye height for kViewFirstPerson -- walking_actor/DoctorFemaleWalk are
+// human-scale (roughly 1.6-1.8m), unlike guide_robot's robots, so this
+// differs from GuiderRobotManager::setViewpoint()'s equivalent value.
+static constexpr double kEyeHeight = 1.6;
+
+// dladdr anchor: resolves to the shared library this code was loaded
+// from, so LoadConfig() can find human_pose_presets.yaml under this
+// package's own share/ directory without hardcoding an install prefix.
+static void ThisLibraryAnchor()
+{
+}
+
+HumanControlPanel::HumanControlPanel()
+  : gz::gui::Plugin()
+{
+}
+
+HumanControlPanel::~HumanControlPanel()
+{
+  for (auto &human : this->humans)
+    this->TerminateProcessGroup(human.process);
+}
+
+void HumanControlPanel::LoadConfig(const tinyxml2::XMLElement *)
+{
+  this->title = "Human Control";
+
+  // Read the human_pose_presets.yaml top-level keys with a plain regex
+  // scan rather than pulling in a YAML library just for this: the file's
+  // shape (2-space-indented "name:" keys under pose_presets:) is stable
+  // and already relied on elsewhere (spawn_human.launch.py's Python side
+  // does load it with PyYAML; this is only the GUI's picker list).
+  std::string packagePrefix;
+  {
+    // This library installs to <prefix>/lib/gz_human_sim/gz-gui/.
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void *>(&ThisLibraryAnchor), &info) && info.dli_fname)
+    {
+      std::string libPath(info.dli_fname);
+      const auto libDir = libPath.find_last_of('/');
+      if (libDir != std::string::npos)
+        packagePrefix = libPath.substr(0, libDir) + "/../../..";
+    }
+  }
+  const std::string presetsPath =
+      packagePrefix + "/share/gz_human_sim/config/human_pose_presets.yaml";
+  std::ifstream presetsFile(presetsPath);
+  if (presetsFile)
+  {
+    std::regex keyPattern(R"(^  ([A-Za-z0-9_]+):\s*$)");
+    std::string line;
+    while (std::getline(presetsFile, line))
+    {
+      std::smatch match;
+      if (std::regex_match(line, match, keyPattern))
+        this->posePresetList << QString::fromStdString(match[1].str());
+    }
+  }
+  if (this->posePresetList.isEmpty())
+    this->posePresetList << "cross_arms";
+
+  // Viewpoint commands touch the Ogre2 scene, which is only safe from the
+  // render thread; watch Render events like GuiderRobotManager does. Render
+  // events are only ever sent to MainWindow, so a filter there is enough
+  // for that.
+  auto *mainWindow = gz::gui::App()->findChild<gz::gui::MainWindow *>();
+  if (mainWindow)
+    mainWindow->installEventFilter(this);
+
+  // QWEASDZXC keyboard teleop needs real key events, which target whichever
+  // QQuickItem currently has focus (e.g. the 3D scene), not MainWindow --
+  // installing on the Application object itself instead catches every
+  // event application-wide (QApplication is the one QObject whose
+  // installEventFilter() acts globally rather than per-object), so the
+  // shortcuts work no matter which panel/item is focused.
+  gz::gui::App()->installEventFilter(this);
+
+  this->DiscoverWorld();
+}
+
+bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
+{
+  if (_event->type() == gz::gui::events::Render::kType)
+  {
+    this->ApplyViewpoint();
+  }
+  else if (_event->type() == QEvent::KeyPress || _event->type() == QEvent::KeyRelease)
+  {
+    auto *keyEvent = static_cast<QKeyEvent *>(_event);
+    // Tracked separately from the per-key switch below (not just read off
+    // modifiers() on a QWEASDZXC key) so QML buttons can also read
+    // shiftHeld live for mouse-driven Shift+click, and so it stays correct
+    // even though isAutoRepeat() presses/releases for the QWEASDZXC keys
+    // themselves are filtered out below.
+    if (keyEvent->key() == Qt::Key_Shift && !keyEvent->isAutoRepeat())
+    {
+      const bool held = _event->type() == QEvent::KeyPress;
+      if (held != this->shiftHeldState)
+      {
+        this->shiftHeldState = held;
+        this->shiftHeldChanged();
+      }
+    }
+    if (!keyEvent->isAutoRepeat() && !IsTextEditFocused())
+    {
+      if (_event->type() == QEvent::KeyPress &&
+          keyEvent->key() >= Qt::Key_1 && keyEvent->key() <= Qt::Key_9)
+      {
+        this->setActiveHuman(keyEvent->key() - Qt::Key_1);
+      }
+      else
+      {
+        std::string direction;
+        switch (keyEvent->key())
+        {
+          case Qt::Key_Q: direction = "Q"; break;
+          case Qt::Key_W: direction = "W"; break;
+          case Qt::Key_E: direction = "E"; break;
+          case Qt::Key_A: direction = "A"; break;
+          case Qt::Key_S: direction = "S"; break;
+          case Qt::Key_D: direction = "D"; break;
+          case Qt::Key_Z: direction = "Z"; break;
+          case Qt::Key_X: direction = "X"; break;
+          case Qt::Key_C: direction = "C"; break;
+          default: break;
+        }
+        if (!direction.empty())
+        {
+          if (_event->type() == QEvent::KeyPress)
+            this->teleopDirection(this->activeHumanIndex, QString::fromStdString(direction),
+                keyEvent->modifiers().testFlag(Qt::ShiftModifier));
+          else
+            this->teleopStop(this->activeHumanIndex);
+        }
+      }
+    }
+  }
+  return QObject::eventFilter(_obj, _event);
+}
+
+QStringList HumanControlPanel::ViewpointLabels() const
+{
+  QStringList result;
+  for (int i = 0; i < kViewCount; ++i)
+    result << kViewpointLabels[i];
+  return result;
+}
+
+void HumanControlPanel::DiscoverWorld()
+{
+  gz::msgs::StringMsg_V worlds;
+  bool result{false};
+  const bool executed = this->node.Request("/gazebo/worlds", 500u, worlds, result);
+
+  if (executed && result && worlds.data_size() > 0)
+  {
+    this->worldName = worlds.data(0);
+    this->SetStatus(
+        QString::fromStdString("接続済み · world: " + this->worldName));
+    return;
+  }
+
+  QTimer::singleShot(500, this, &HumanControlPanel::DiscoverWorld);
+}
+
+QStringList HumanControlPanel::HumanModels() const
+{
+  QStringList result;
+  for (int i = 0; i < kHumanModelCount; ++i)
+    result << kHumanModels[i];
+  return result;
+}
+
+QStringList HumanControlPanel::PosePresets() const
+{
+  return this->posePresetList;
+}
+
+QStringList HumanControlPanel::FollowModeLabels() const
+{
+  return {"テレオペ", "経路専用（テレオペ無視）"};
+}
+
+QStringList HumanControlPanel::PathTemplateLabels() const
+{
+  QStringList result;
+  for (int i = 0; i < kPathTemplateCount; ++i)
+    result << kPathTemplateLabels[i];
+  return result;
+}
+
+QStringList HumanControlPanel::HumanList() const
+{
+  QStringList result;
+  for (const auto &human : this->humans)
+    result << QString::fromStdString(human.name + "  (" + human.model + ")");
+  return result;
+}
+
+QString HumanControlPanel::Status() const
+{
+  return this->statusText;
+}
+
+int HumanControlPanel::ActiveHumanIndex() const
+{
+  return this->activeHumanIndex;
+}
+
+bool HumanControlPanel::ShiftHeld() const
+{
+  return this->shiftHeldState;
+}
+
+int HumanControlPanel::ActiveViewIndex() const
+{
+  if (this->activeHumanIndex < 0 ||
+      this->activeHumanIndex >= static_cast<int>(this->humans.size()))
+    return kViewFree;
+  return this->humans.at(this->activeHumanIndex).viewIndex;
+}
+
+double HumanControlPanel::ActiveViewDistance() const
+{
+  if (this->activeHumanIndex < 0 ||
+      this->activeHumanIndex >= static_cast<int>(this->humans.size()))
+    return 2.0;
+  return this->humans.at(this->activeHumanIndex).viewDistance;
+}
+
+int HumanControlPanel::ActiveFollowModeIndex() const
+{
+  if (this->activeHumanIndex < 0 ||
+      this->activeHumanIndex >= static_cast<int>(this->humans.size()))
+    return 0;
+  return this->humans.at(this->activeHumanIndex).followModeIndex;
+}
+
+void HumanControlPanel::setActiveHuman(int _index)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  if (this->activeHumanIndex == _index)
+    return;
+  this->activeHumanIndex = _index;
+  this->activeHumanChanged();
+  this->activeFollowModeChanged();
+  // Same auto-focus as a fresh spawn (see PollSpawnConfirmation): jump the
+  // camera to a diagonal-up view of whichever human just became "対象".
+  // This also updates the human's stored viewIndex/viewDistance and fires
+  // activeViewIndexChanged() itself (since _index == activeHumanIndex by
+  // now), so no separate call to that is needed here.
+  this->setViewpoint(_index, kViewFrontRightUp, 2.0);
+  this->SetStatus(QString::fromStdString(this->humans.at(_index).name) +
+      " をキーボード/視点操作対象にしました（斜め上視点に切替）");
+}
+
+void HumanControlPanel::SetStatus(const QString &_status)
+{
+  this->statusText = _status;
+  this->StatusChanged();
+}
+
+QString HumanControlPanel::defaultName(int _modelIndex) const
+{
+  (void)_modelIndex;
+  return QString("human%1").arg(this->humans.size() + 1);
+}
+
+QString HumanControlPanel::modelDescription(int _modelIndex) const
+{
+  if (_modelIndex < 0 || _modelIndex >= kHumanModelCount)
+    return {};
+  return kHumanModelDescriptions[_modelIndex];
+}
+
+double HumanControlPanel::defaultZ(int _modelIndex) const
+{
+  if (_modelIndex < 0 || _modelIndex >= kHumanModelCount)
+    return 1.0;
+  return kHumanModelDefaultZ[_modelIndex];
+}
+
+double HumanControlPanel::nextSpawnX() const
+{
+  const int index = static_cast<int>(this->humans.size()) % kSpawnGridColumns;
+  return index * kSpawnGridSpacing;
+}
+
+double HumanControlPanel::nextSpawnY() const
+{
+  const int index = static_cast<int>(this->humans.size()) / kSpawnGridColumns;
+  return index * kSpawnGridSpacing;
+}
+
+bool HumanControlPanel::isCustomHuman(int _modelIndex) const
+{
+  return _modelIndex == kCustomHumanIndex;
+}
+
+bool HumanControlPanel::isActorModel(int _modelIndex) const
+{
+  return IsActorIndex(_modelIndex);
+}
+
+QString HumanControlPanel::followModeValue(int _followModeIndex) const
+{
+  if (_followModeIndex < 0 || _followModeIndex >= kFollowModeCount)
+    return "auto";
+  return kFollowModeValues[_followModeIndex];
+}
+
+void HumanControlPanel::setFollowMode(int _index, int _followModeIndex)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  if (_followModeIndex < 0 || _followModeIndex >= kFollowModeCount)
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.followModePublisher.Valid())
+    return;
+
+  gz::msgs::StringMsg message;
+  message.set_data(kFollowModeValues[_followModeIndex]);
+  human.followModePublisher.Publish(message);
+
+  human.followModeIndex = _followModeIndex;
+  if (_index == this->activeHumanIndex)
+    this->activeFollowModeChanged();
+  this->SetStatus(QString::fromStdString(human.name) + " の動作モードを「" +
+      this->FollowModeLabels().value(_followModeIndex) + "」に変更しました");
+}
+
+bool HumanControlPanel::isHumanActorAt(int _index) const
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return false;
+  return this->humans.at(_index).velocityPublisher.Valid();
+}
+
+QProcess *HumanControlPanel::StartLaunchProcess(const QStringList &_arguments)
+{
+  auto *process = new QProcess(this);
+  // setsid makes the child (ros2 launch, plus every node it spawns) its
+  // own process group, so TerminateProcessGroup() can signal all of them
+  // at once on removal instead of leaving orphaned bridge/spawn nodes
+  // behind. Same pattern as guide_robot's GuiderRobotManager.
+  process->setProgram("setsid");
+  process->setArguments(QStringList{"ros2"} + _arguments);
+  process->setStandardOutputFile(QProcess::nullDevice());
+  process->setStandardErrorFile(QProcess::nullDevice());
+  process->start();
+  if (!process->waitForStarted(3000))
+  {
+    process->deleteLater();
+    return nullptr;
+  }
+  return process;
+}
+
+void HumanControlPanel::TerminateProcessGroup(QProcess *_process)
+{
+  if (!_process)
+    return;
+  const qint64 pid = _process->processId();
+  if (pid > 0)
+  {
+    ::kill(static_cast<pid_t>(-pid), SIGINT);
+    QTimer::singleShot(4000, this, [pid]()
+    {
+      if (::kill(static_cast<pid_t>(-pid), 0) == 0)
+        ::kill(static_cast<pid_t>(-pid), SIGTERM);
+    });
+    QTimer::singleShot(8000, this, [pid]()
+    {
+      if (::kill(static_cast<pid_t>(-pid), 0) == 0)
+        ::kill(static_cast<pid_t>(-pid), SIGKILL);
+    });
+  }
+  QTimer::singleShot(9000, this, [guard = QPointer<QProcess>(_process)]()
+  {
+    if (guard)
+      guard->deleteLater();
+  });
+}
+
+void HumanControlPanel::RequestEntityRemoval(const std::string &_name)
+{
+  gz::msgs::Entity request;
+  request.set_name(_name);
+  request.set_type(gz::msgs::Entity::MODEL);
+
+  const std::string service = "/world/" + this->worldName + "/remove";
+  std::function<void(const gz::msgs::Boolean &, const bool)> callback =
+      [](const gz::msgs::Boolean &, const bool) { /* fire and forget */ };
+  this->node.Request(service, request, callback);
+}
+
+bool HumanControlPanel::QueryEntityExists(const std::string &_name)
+{
+  if (this->worldName.empty())
+    return false;
+  // /world/<w>/scene/info and the `gz model` CLI only enumerate MODEL-type
+  // entities -- actors (what every human_model this panel spawns actually
+  // is) are a distinct entity kind in gz-sim's ECS and never show up
+  // there, spawned-at-load-time or not (verified: even `gz model -m
+  // <name> -p` reports "No model named <name> was found" for a live,
+  // just-spawned, teleoperable actor). /world/<w>/state is the one
+  // service that does include actors -- its response is the raw
+  // serialized ECS component set, so rather than hand-walking gz-sim's
+  // component type IDs to decode it, this just substring-searches the
+  // serialized bytes for the entity's Name component string. Good enough
+  // for an existence check: after a real removal every component
+  // mentioning that name (Name, the plugin's own vel_topic/path_topic
+  // strings, ...) is gone from the ECS too.
+  gz::msgs::Empty request;
+  gz::msgs::SerializedStepMap response;
+  bool result = false;
+  const bool executed = this->node.Request(
+      "/world/" + this->worldName + "/state", request,
+      kStateQueryTimeoutMs, response, result);
+  if (!executed || !result)
+    return false;
+  const std::string serialized = response.SerializeAsString();
+  return serialized.find(_name) != std::string::npos;
+}
+
+void HumanControlPanel::spawnHuman(
+    int _modelIndex, const QString &_name, const QString &_posePreset,
+    const QString &_followMode, double _x, double _y, double _z, double _yaw)
+{
+  if (_modelIndex < 0 || _modelIndex >= kHumanModelCount)
+    return;
+  if (this->worldName.empty())
+  {
+    this->SetStatus("ワールド未検出のためspawnできません");
+    return;
+  }
+
+  const QString name = _name.trimmed();
+  if (name.isEmpty())
+  {
+    this->SetStatus("名前を入力してください");
+    return;
+  }
+  const std::string nameStd = name.toStdString();
+  for (const auto &human : this->humans)
+  {
+    if (human.name == nameStd)
+    {
+      this->SetStatus(name + " は既に存在します。別名にしてください");
+      return;
+    }
+  }
+  // A name this panel doesn't know about may still be live in gz (a ghost
+  // from an earlier session/crash, or another tool). Spawning on top of it
+  // silently corrupts gz-sim's name lookup -- both copies become
+  // unfindable by name afterward, which is what made removal fail. Refuse
+  // instead of reproducing that.
+  if (this->QueryEntityExists(nameStd))
+  {
+    this->SetStatus(name + " は既にワールドに存在します。別名にするか、"
+        "先にGazeboを再起動してゴーストエンティティを解消してください");
+    return;
+  }
+
+  const QString model = kHumanModels[_modelIndex];
+  QStringList arguments;
+  arguments << "launch" << "gz_human_sim" << "spawn_human.launch.py"
+            << "world_name:=" + QString::fromStdString(this->worldName)
+            // namespace must match what this panel publishes teleop Twist
+            // messages to below (velocityTopic/pathTopic): spawn_human.launch.py
+            // derives the actor's vel_topic/path_topic SDF params from this
+            // argument, so without it every spawned actor ends up wired to
+            // the unnamespaced /cmd_vel and the teleop pad silently does
+            // nothing (also breaks human_teleop_switcher.py, which publishes
+            // to the namespaced /human1,2/cmd_vel ROS topics by name).
+            << "namespace:=" + name
+            << "model_name:=" + name
+            << "human_model:=" + model
+            << "enable_teleop:=false"
+            << "x:=" + QString::number(_x) << "y:=" + QString::number(_y)
+            << "z:=" + QString::number(_z) << "yaw:=" + QString::number(_yaw);
+  if (_modelIndex == kCustomHumanIndex && !_posePreset.isEmpty())
+    arguments << "human_pose:=" + _posePreset;
+  if (IsActorIndex(_modelIndex) && !_followMode.isEmpty())
+    arguments << "follow_mode:=" + _followMode;
+
+  auto *process = this->StartLaunchProcess(arguments);
+  if (!process)
+  {
+    this->SetStatus(name + " の起動に失敗しました");
+    return;
+  }
+
+  this->SetStatus(name + " をspawn中…（存在確認待ち）");
+  QTimer::singleShot(kEntityPollIntervalMs, this,
+      [this, name, model, followMode = _followMode, process = QPointer<QProcess>(process),
+       _x, _y, _z, _yaw]()
+      {
+        this->PollSpawnConfirmation(name, model, followMode, process, _x, _y, _z, _yaw, 0);
+      });
+}
+
+void HumanControlPanel::PollSpawnConfirmation(
+    QString _name, QString _model, QString _followMode, QPointer<QProcess> _process,
+    double _x, double _y, double _z, double _yaw, int _attempt)
+{
+  const std::string nameStd = _name.toStdString();
+  if (!this->QueryEntityExists(nameStd))
+  {
+    if (_attempt + 1 >= kEntityPollMaxAttempts)
+    {
+      this->SetStatus(_name + " のspawnに失敗しました（"
+          + QString::number(kEntityPollMaxAttempts * kEntityPollIntervalMs / 1000)
+          + "秒待っても見つかりません）");
+      this->TerminateProcessGroup(_process);
+      return;
+    }
+    QTimer::singleShot(kEntityPollIntervalMs, this,
+        [this, _name, _model, _followMode, _process, _x, _y, _z, _yaw, _attempt]()
+        {
+          this->PollSpawnConfirmation(
+              _name, _model, _followMode, _process, _x, _y, _z, _yaw, _attempt + 1);
+        });
+    return;
+  }
+
+  const int modelIndex = static_cast<int>(
+      std::find(std::begin(kHumanModels), std::end(kHumanModels),
+          _model.toStdString()) - std::begin(kHumanModels));
+
+  Human human;
+  human.name = nameStd;
+  human.model = _model.toStdString();
+  human.process = _process;
+  if (IsActorIndex(modelIndex))
+  {
+    const std::string velocityTopic = "/" + nameStd + "/cmd_vel";
+    const std::string pathTopic = "/" + nameStd + "/cmd_path";
+    const std::string removeTopic = "/" + nameStd + "/remove_actor";
+    const std::string followModeTopic = "/" + nameStd + "/set_follow_mode";
+    human.velocityPublisher =
+        this->node.Advertise<gz::msgs::Twist>(velocityTopic);
+    human.pathPublisher =
+        this->node.Advertise<gz::msgs::Pose_V>(pathTopic);
+    human.removePublisher =
+        this->node.Advertise<gz::msgs::Empty>(removeTopic);
+    human.followModePublisher =
+        this->node.Advertise<gz::msgs::StringMsg>(followModeTopic);
+    const std::string followModeStd = _followMode.isEmpty()
+        ? "auto" : _followMode.toStdString();
+    const auto followModeIt = std::find(
+        std::begin(kFollowModeValues), std::end(kFollowModeValues), followModeStd);
+    human.followModeIndex = followModeIt != std::end(kFollowModeValues)
+        ? static_cast<int>(followModeIt - std::begin(kFollowModeValues)) : 0;
+  }
+  this->humans.push_back(std::move(human));
+  const int newIndex = static_cast<int>(this->humans.size()) - 1;
+  this->humansChanged();
+  this->SetStatus(_name + " (" + _model + ") を (" +
+      QString::number(_x) + ", " + QString::number(_y) + ", " +
+      QString::number(_z) + ") yaw=" + QString::number(_yaw) + " にspawnしました");
+
+  // Newly spawned human becomes the active target for both the keyboard
+  // (QWEASDZXC only actually moves actor-backed humans, but 1-9/"対象に
+  // する" still work either way) and the single global viewpoint control
+  // below -- the common case is spawn-then-immediately-look-at-it, and
+  // both stay switchable afterward.
+  this->activeHumanIndex = newIndex;
+  this->activeHumanChanged();
+  this->activeFollowModeChanged();
+
+  // guide_robot(GuiderRobotManager)がspawn直後に自動でview index 7
+  // （右奥上から・全体俯瞰）へカメラを合わせるのと同じ挙動。activeHumanIndex
+  // をこの直前に設定しているので、setViewpoint()内のactiveViewIndexChanged()
+  // 発火でグローバルの視点コンボにも即反映される。
+  this->setViewpoint(newIndex, kViewFrontRightUp, 2.0);
+}
+
+void HumanControlPanel::removeHuman(int _index)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  if (this->worldName.empty())
+  {
+    this->SetStatus("ワールド未検出のため削除できません");
+    return;
+  }
+
+  Human human = std::move(this->humans.at(_index));
+  this->humans.erase(this->humans.begin() + _index);
+  this->humansChanged();
+
+  // Keep the keyboard target pointing at the same logical human across the
+  // index shift caused by erase(), or clear it if that's the one removed.
+  if (this->activeHumanIndex == _index)
+    this->activeHumanIndex = -1;
+  else if (this->activeHumanIndex > _index)
+    --this->activeHumanIndex;
+  this->activeHumanChanged();
+  this->activeViewIndexChanged();
+  this->activeFollowModeChanged();
+
+  this->TerminateProcessGroup(human.process);
+
+  const QString name = QString::fromStdString(human.name);
+  if (!this->QueryEntityExists(human.name))
+  {
+    // Already gone (or never actually existed -- a ghost list entry from
+    // an earlier collision): nothing to ask gz to remove, and doing so
+    // anyway just adds another confusing "not found" line to the server
+    // log for no reason.
+    this->SetStatus(name + " は既にワールドから存在しません（一覧から削除）");
+    return;
+  }
+
+  if (human.removePublisher.Valid())
+  {
+    // Actor-backed human: /world/<w>/remove can't take an ACTOR (see
+    // RequestEntityRemoval()'s comment), so ask the actor's own
+    // ActorCommandPlugin to remove itself via the ECM instead.
+    gz::msgs::Empty message;
+    human.removePublisher.Publish(message);
+  }
+  else
+  {
+    this->RequestEntityRemoval(human.name);
+  }
+  this->SetStatus(name + " を削除中…（確認待ち）");
+  QTimer::singleShot(kEntityPollIntervalMs, this,
+      [this, name]() { this->PollRemovalConfirmation(name, 0); });
+}
+
+void HumanControlPanel::PollRemovalConfirmation(QString _name, int _attempt)
+{
+  const std::string nameStd = _name.toStdString();
+  if (!this->QueryEntityExists(nameStd))
+  {
+    this->SetStatus(_name + " を削除しました");
+    return;
+  }
+  if (_attempt + 1 >= kEntityPollMaxAttempts)
+  {
+    this->SetStatus(_name + " の削除を確認できませんでした（Gazebo側に残っている可能性があります）");
+    return;
+  }
+  QTimer::singleShot(kEntityPollIntervalMs, this,
+      [this, _name, _attempt]()
+      {
+        this->PollRemovalConfirmation(_name, _attempt + 1);
+      });
+}
+
+void HumanControlPanel::teleopMove(
+    int _index, double _linear, double _lateral, double _angular)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.velocityPublisher.Valid())
+    return;
+
+  gz::msgs::Twist message;
+  message.mutable_linear()->set_x(_linear);
+  message.mutable_linear()->set_y(_lateral);
+  message.mutable_angular()->set_z(_angular);
+  human.velocityPublisher.Publish(message);
+}
+
+void HumanControlPanel::teleopStop(int _index)
+{
+  // Bump the generation first so a pending turn-then-walk sequence (see
+  // teleopDirection() below) can't land its second phase after the user
+  // has already let go.
+  if (_index >= 0 && _index < static_cast<int>(this->humans.size()))
+    ++this->humans.at(_index).teleopGeneration;
+  this->teleopMove(_index, 0.0, 0.0, 0.0);
+}
+
+void HumanControlPanel::teleopDirection(
+    int _index, const QString &_direction, bool _turnToFace)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+
+  double linear = 0.0;
+  double lateral = 0.0;
+  double angular = 0.0;
+  if (!DirectionToTwist(_direction.toStdString(), linear, lateral, angular))
+    return;
+
+  if (_turnToFace && _direction != "S")
+  {
+    // Shift+key: turn in place to face this direction, then walk forward,
+    // rather than a plain strafe. Done as two sequential phases -- holding
+    // a constant linear+angular Twist together would just trace a circle
+    // forever (unicycle-model kinematics), not a turn-then-walk motion.
+    // headingOffset is this direction's angle relative to the actor's
+    // current facing (0 = W/straight ahead, +-pi = X/straight back), read
+    // straight off the same (linear, lateral) the plain-strafe path above
+    // uses; magnitude is kTeleopSpeed for every entry in that table by
+    // construction (see DirectionToTwist()'s comment), so phase 2 always
+    // walks forward at the same speed regardless of which key this was.
+    const double headingOffset = std::atan2(lateral, linear);
+    const double magnitude = std::hypot(linear, lateral);
+    const int generation = ++this->humans.at(_index).teleopGeneration;
+    if (std::abs(headingOffset) < 1e-6)
+    {
+      // W: already facing the right way, no turn phase needed.
+      this->teleopMove(_index, magnitude, 0.0, 0.0);
+      return;
+    }
+    const double turnRate =
+        headingOffset > 0.0 ? kTeleopTurnRate : -kTeleopTurnRate;
+    this->teleopMove(_index, 0.0, 0.0, turnRate);
+    const int turnDurationMs = static_cast<int>(
+        (std::abs(headingOffset) / kTeleopTurnRate) * 1000.0);
+    QTimer::singleShot(turnDurationMs, this,
+        [this, _index, generation, magnitude]()
+        {
+          if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+            return;
+          if (this->humans.at(_index).teleopGeneration != generation)
+            return;
+          this->teleopMove(_index, magnitude, 0.0, 0.0);
+        });
+    return;
+  }
+
+  ++this->humans.at(_index).teleopGeneration;
+  this->teleopMove(_index, linear, lateral, angular);
+}
+
+void HumanControlPanel::sendWaypoint(int _index, double _x, double _y)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.pathPublisher.Valid())
+    return;
+
+  gz::msgs::Pose_V message;
+  auto *pose = message.add_pose();
+  pose->mutable_position()->set_x(_x);
+  pose->mutable_position()->set_y(_y);
+  pose->mutable_orientation()->set_w(1.0);
+  human.pathPublisher.Publish(message);
+}
+
+void HumanControlPanel::sendPathTemplate(
+    int _index, int _templateIndex, double _centerX, double _centerY,
+    double _size, int _numWaypoints, bool _clockwise)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.pathPublisher.Valid())
+    return;
+  if (_templateIndex < 0 || _templateIndex >= kPathTemplateCount)
+    return;
+
+  // (x, y, yaw) tuples, same math as scripts/path_template.py's
+  // _circle_waypoints()/_square_waypoints() -- kept in sync by hand since
+  // one is Python (for headless/CLI use) and this is C++ (for the GUI
+  // button), not sharable code between the two.
+  std::vector<std::array<double, 3>> waypoints;
+  const double direction = _clockwise ? -1.0 : 1.0;
+
+  if (_templateIndex == kPathTemplateCircle)
+  {
+    const double radius = std::max(0.1, _size);
+    const int count = std::clamp(_numWaypoints, 3, 200);
+    for (int i = 0; i < count; ++i)
+    {
+      const double angle = direction * i * (2.0 * M_PI / count);
+      const double tangent = angle + direction * (M_PI / 2.0);
+      waypoints.push_back({_centerX + radius * std::cos(angle),
+          _centerY + radius * std::sin(angle), tangent});
+    }
+  }
+  else
+  {
+    const double half = std::max(0.1, _size) / 2.0;
+    std::vector<std::pair<double, double>> corners = {
+      {_centerX + half, _centerY + half}, {_centerX - half, _centerY + half},
+      {_centerX - half, _centerY - half}, {_centerX + half, _centerY - half}};
+    if (_clockwise)
+      std::reverse(corners.begin() + 1, corners.end());
+    for (std::size_t i = 0; i < corners.size(); ++i)
+    {
+      const auto &[x, y] = corners[i];
+      const auto &[nextX, nextY] = corners[(i + 1) % corners.size()];
+      waypoints.push_back({x, y, std::atan2(nextY - y, nextX - x)});
+    }
+  }
+
+  gz::msgs::Pose_V message;
+  for (const auto &[x, y, yaw] : waypoints)
+  {
+    auto *pose = message.add_pose();
+    pose->mutable_position()->set_x(x);
+    pose->mutable_position()->set_y(y);
+    pose->mutable_orientation()->set_z(std::sin(yaw * 0.5));
+    pose->mutable_orientation()->set_w(std::cos(yaw * 0.5));
+  }
+  human.pathPublisher.Publish(message);
+  this->SetStatus(QString::fromStdString(human.name) + " に" +
+      kPathTemplateLabels[_templateIndex] + "の経路（" +
+      QString::number(waypoints.size()) + "点）を送信しました");
+}
+
+void HumanControlPanel::setViewpoint(int _index, int _viewIndex, double _distance)
+{
+  if (_viewIndex < 0 || _viewIndex >= kViewCount)
+    return;
+
+  // Record this as _index's current view (for ActiveViewIndex()/
+  // ActiveViewDistance(), which the global viewpoint combo/distance field
+  // bind to) whenever _index is a real human, regardless of which branch
+  // below actually runs -- including kViewFree, so switching back to this
+  // human later shows "自由視点" rather than a stale prior selection.
+  if (_index >= 0 && _index < static_cast<int>(this->humans.size()))
+  {
+    this->humans.at(_index).viewIndex = _viewIndex;
+    this->humans.at(_index).viewDistance = _distance;
+    if (_index == this->activeHumanIndex)
+      this->activeViewIndexChanged();
+  }
+
+  if (_viewIndex == kViewFree)
+  {
+    this->viewpointTarget.clear();
+    std::lock_guard<std::mutex> lock(this->viewMutex);
+    this->viewCommand = ViewCommand();
+    this->viewCommand.pending = true;
+    this->viewCommand.engage = false;
+    this->viewCommand.label = "カメラを自由視点に戻しました";
+    return;
+  }
+
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+  {
+    this->SetStatus("視点変更：対象の人物がありません");
+    return;
+  }
+
+  const double distance = std::clamp(_distance, 0.3, 50.0);
+  // Eye level scales with distance: near views sit low, far views look
+  // down a little.
+  const double height = std::clamp(distance * 0.5, 0.4, 2.5);
+
+  ViewCommand command;
+  command.pending = true;
+  command.engage = true;
+  command.target = this->humans.at(_index).name;
+
+  switch (_viewIndex)
+  {
+    case kViewFirstPerson:
+      // Camera right at the actor's own head, looking out at a point far
+      // ahead in its own frame: turns with the actor like its own eyes.
+      // The distance box doesn't apply to this view (same as
+      // GuiderRobotManager's equivalent).
+      command.followOffset = {0.1, 0.0, kEyeHeight};
+      command.trackOffset = {3.0, 0.0, kEyeHeight - 0.05};
+      break;
+    case kViewBehind:
+      command.followOffset = {-distance, 0.0, height};
+      break;
+    case kViewFront:
+      command.followOffset = {distance, 0.0, height};
+      break;
+    case kViewRight:
+      command.followOffset = {0.0, -distance, height};
+      break;
+    case kViewLeft:
+      command.followOffset = {0.0, distance, height};
+      break;
+    case kViewTop:
+      // A touch of forward offset avoids the straight-down singularity.
+      command.followOffset = {std::max(0.3, distance * 0.1), 0.0, distance};
+      command.trackOffset = {0.0, 0.0, 0.0};
+      break;
+    case kViewFrontRightUp:
+    case kViewFrontLeftUp:
+    {
+      const double lateral = _viewIndex == kViewFrontRightUp
+        ? -distance * 0.7 : distance * 0.7;
+      const double up = std::clamp(distance * 0.8, 0.6, 4.0);
+      command.followOffset = {distance * 0.7, lateral, up};
+      break;
+    }
+    default:
+      return;
+  }
+
+  command.label = QString("カメラ視点：%1（%2）")
+      .arg(kViewpointLabels[_viewIndex],
+           QString::fromStdString(this->humans.at(_index).name));
+
+  this->viewpointTarget = command.target;
+  std::lock_guard<std::mutex> lock(this->viewMutex);
+  this->viewCommand = command;
+}
+
+void HumanControlPanel::resetToInitialView()
+{
+  this->viewpointTarget.clear();
+  // The active human's combo should reflect reality: nothing is being
+  // followed anymore once this takes effect.
+  if (this->activeHumanIndex >= 0 &&
+      this->activeHumanIndex < static_cast<int>(this->humans.size()))
+  {
+    this->humans.at(this->activeHumanIndex).viewIndex = kViewFree;
+    this->activeViewIndexChanged();
+  }
+  std::lock_guard<std::mutex> lock(this->viewMutex);
+  this->viewCommand = ViewCommand();
+  this->viewCommand.pending = true;
+  this->viewCommand.engage = false;
+  this->viewCommand.resetPose = true;
+  this->viewCommand.label = this->initialCameraPoseCaptured
+      ? "初期の全体俯瞰視点に戻しました"
+      : "初期視点をまだ取得できていません（3Dビューの読み込み待ち）";
+}
+
+void HumanControlPanel::ApplyViewpoint()
+{
+  ViewCommand command;
+  bool hasCommand = false;
+  {
+    std::lock_guard<std::mutex> lock(this->viewMutex);
+    hasCommand = this->viewCommand.pending;
+    if (hasCommand)
+      command = this->viewCommand;
+  }
+  if (!hasCommand)
+    return;
+
+  auto scene = gz::rendering::sceneFromFirstRenderEngine();
+  if (!scene)
+    return;
+
+  // The MinimalScene plugin tags the GUI camera with this user data.
+  if (!this->userCamera)
+  {
+    for (unsigned int i = 0; i < scene->NodeCount(); ++i)
+    {
+      auto camera = std::dynamic_pointer_cast<gz::rendering::Camera>(
+          scene->NodeByIndex(i));
+      if (!camera || !camera->HasUserData("user-camera"))
+        continue;
+      const auto data = camera->UserData("user-camera");
+      const auto *flag = std::get_if<bool>(&data);
+      if (flag && *flag)
+      {
+        this->userCamera = camera;
+        break;
+      }
+    }
+    if (!this->userCamera)
+      return;
+    // First time the camera is found, it's still wherever gui.config's
+    // MinimalScene <camera_pose> placed it -- nothing has engaged
+    // follow/track yet at this point in a fresh launch. Save it so
+    // resetToInitialView() has a real pose to snap back to.
+    this->initialCameraPose = this->userCamera->WorldPose();
+    this->initialCameraPoseCaptured = true;
+  }
+
+  const auto finish = [this]()
+  {
+    std::lock_guard<std::mutex> lock(this->viewMutex);
+    this->viewCommand.pending = false;
+  };
+
+  if (!command.engage)
+  {
+    this->userCamera->SetFollowTarget(nullptr);
+    this->userCamera->SetTrackTarget(nullptr);
+    if (command.resetPose && this->initialCameraPoseCaptured)
+      this->userCamera->SetWorldPose(this->initialCameraPose);
+    finish();
+    this->SetStatus(command.label);
+    return;
+  }
+
+  // Rendering node names may carry "id::" scope prefixes; accept both the
+  // plain model name and a scoped suffix match.
+  gz::rendering::NodePtr target = scene->NodeByName(command.target);
+  if (!target)
+  {
+    const std::string suffix = "::" + command.target;
+    for (unsigned int i = 0; i < scene->VisualCount(); ++i)
+    {
+      auto visual = scene->VisualByIndex(i);
+      if (!visual)
+        continue;
+      const std::string &name = visual->Name();
+      if (name.size() >= suffix.size() &&
+          name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+      {
+        target = visual;
+        break;
+      }
+    }
+  }
+
+  if (!target)
+  {
+    // The model may still be spawning; retry for ~10 s of frames.
+    std::lock_guard<std::mutex> lock(this->viewMutex);
+    if (++this->viewCommand.retries > 600)
+    {
+      this->viewCommand.pending = false;
+      this->SetStatus(
+          QString("視点変更：%1 が見つかりません")
+              .arg(QString::fromStdString(command.target)));
+    }
+    return;
+  }
+
+  // Offsets are in the human's local frame (worldFrame = false), so every
+  // view turns together with the human.
+  this->userCamera->SetFollowTarget(target, command.followOffset, false);
+  this->userCamera->SetFollowPGain(0.35);
+  this->userCamera->SetTrackTarget(target, command.trackOffset, false);
+  this->userCamera->SetTrackPGain(0.35);
+
+  finish();
+  this->SetStatus(command.label);
+}
+}  // namespace gz_human_sim
+
+GZ_ADD_PLUGIN(
+  gz_human_sim::HumanControlPanel,
+  gz::gui::Plugin)

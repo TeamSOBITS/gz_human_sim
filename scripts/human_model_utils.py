@@ -8,20 +8,38 @@ import yaml
 CUSTOM_HUMAN_Z_OFFSET = 0.9673
 
 
-def resolve_walking_actor_model(package_share, velocity_topic, path_topic):
-    """Return a path to a walking_actor model.sdf with model:// mesh URIs
-    baked into absolute paths.
+# Actor models that ship with a ready-to-spawn model.sdf under models/<name>/
+# and can be driven by ActorCommandPlugin. DoctorFemaleWalk carries no
+# baked-in plugin (one is injected below), while walking_actor already has
+# one with placeholder /cmd_vel /cmd_path /remove_actor topics.
+#
+# person_walking used to be listed here too; dropped because it's the same
+# "Mingfei" generic-actor mesh walking_actor already vendors locally, just
+# fetched from a remote Fuel URL at spawn time instead, and without its own
+# plugin -- a strictly worse duplicate, not a second distinct avatar.
+ACTOR_MODEL_NAMES = ('walking_actor', 'DoctorFemaleWalk')
 
-    gzserver is typically already running (started by an outer launch file,
-    e.g. sobit_edu's gz_minimal.launch.py) by the time this package's
+
+def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
+                         remove_topic, follow_mode_topic, follow_mode='auto',
+                         animation_name='walk', animation_factor=4.0,
+                         linear_velocity=1.0, linear_tolerance=0.1):
+    """Return a path to a <model_name> model.sdf ready for runtime spawn.
+
+    gzserver is typically already running by the time this package's
     spawn_human.launch.py runs. Setting GZ_SIM_RESOURCE_PATH from within
     spawn_human.launch.py only affects processes it spawns itself, not the
-    already-running gzserver/gzclient, so model://walking_actor/... URIs
+    already-running gzserver/gzclient, so model://<model_name>/... URIs
     inside the actor's own model.sdf never get resolved by the server.
     Rewriting them to absolute paths sidesteps resource-path resolution
     entirely, the same way generate_custom_human_model() already does.
+
+    The model must carry a gz_human_sim::ActorCommandPlugin block wired to
+    velocity_topic/path_topic: one is injected if the model.sdf doesn't
+    already have a <plugin>, otherwise the existing block's topics are
+    rewritten (this is what walking_actor's model.sdf relies on).
     """
-    model_dir = os.path.join(package_share, 'models', 'walking_actor')
+    model_dir = os.path.join(package_share, 'models', model_name)
     mesh_dir = os.path.join(model_dir, 'meshes')
     package_prefix = os.path.dirname(os.path.dirname(package_share))
     plugin_library = os.path.join(
@@ -34,26 +52,51 @@ def resolve_walking_actor_model(package_share, velocity_topic, path_topic):
     with open(source_sdf, 'r', encoding='utf-8') as sdf_file:
         sdf_text = sdf_file.read()
 
-    resolved_text, count = re.subn(
-        r'model://walking_actor/meshes/', f'{mesh_dir}/', sdf_text
-    )
-    resolved_text = resolved_text.replace(
-        'filename="libgz_human_actor_command.so"',
-        f'filename="{plugin_library}"',
-        1,
-    )
-    resolved_text = resolved_text.replace("<vel_topic>/cmd_vel</vel_topic>", f"<vel_topic>{velocity_topic}</vel_topic>", 1)
-    resolved_text = resolved_text.replace("<path_topic>/cmd_path</path_topic>", f"<path_topic>{path_topic}</path_topic>", 1)
-    if count == 0:
-        raise RuntimeError(
-            f"No 'model://walking_actor/meshes/' URIs found in {source_sdf}. "
-            "Check that the file wasn't changed to a different URI style."
+    resolved_text = sdf_text.replace(f'model://{model_name}/meshes/', f'{mesh_dir}/')
+
+    if '<plugin' in resolved_text:
+        resolved_text = resolved_text.replace(
+            'filename="libgz_human_actor_command.so"',
+            f'filename="{plugin_library}"',
+            1,
         )
+        resolved_text = resolved_text.replace(
+            '<vel_topic>/cmd_vel</vel_topic>', f'<vel_topic>{velocity_topic}</vel_topic>', 1)
+        resolved_text = resolved_text.replace(
+            '<path_topic>/cmd_path</path_topic>', f'<path_topic>{path_topic}</path_topic>', 1)
+        resolved_text = resolved_text.replace(
+            '<remove_topic>/remove_actor</remove_topic>',
+            f'<remove_topic>{remove_topic}</remove_topic>', 1)
+        resolved_text = resolved_text.replace(
+            '<follow_mode_topic>/set_follow_mode</follow_mode_topic>',
+            f'<follow_mode_topic>{follow_mode_topic}</follow_mode_topic>', 1)
+        resolved_text = resolved_text.replace(
+            '<follow_mode>auto</follow_mode>', f'<follow_mode>{follow_mode}</follow_mode>', 1)
+    else:
+        plugin_block = (
+            f'<plugin filename="{plugin_library}" '
+            'name="gz_human_sim::ActorCommandPlugin">'
+            f'<vel_topic>{velocity_topic}</vel_topic>'
+            f'<path_topic>{path_topic}</path_topic>'
+            f'<remove_topic>{remove_topic}</remove_topic>'
+            f'<follow_mode_topic>{follow_mode_topic}</follow_mode_topic>'
+            f'<follow_mode>{follow_mode}</follow_mode>'
+            f'<animation_name>{animation_name}</animation_name>'
+            f'<animation_factor>{animation_factor}</animation_factor>'
+            f'<linear_tolerance>{linear_tolerance}</linear_tolerance>'
+            f'<linear_velocity>{linear_velocity}</linear_velocity>'
+            '</plugin>'
+        )
+        resolved_text, count = re.subn(
+            r'(<actor\s+name="[^"]*">)', r'\1' + plugin_block, resolved_text, count=1
+        )
+        if count == 0:
+            raise RuntimeError(f'No <actor name="..."> element found in {source_sdf}.')
 
     cache_dir = os.path.join(tempfile.gettempdir(), 'gz_human_sim')
     os.makedirs(cache_dir, exist_ok=True)
-    topic_key = re.sub(r'[^A-Za-z0-9_.-]', '_', velocity_topic)
-    generated_sdf = os.path.join(cache_dir, f'walking_actor_{topic_key}.sdf')
+    topic_key = re.sub(r'[^A-Za-z0-9_.-]', '_', f'{model_name}_{velocity_topic}')
+    generated_sdf = os.path.join(cache_dir, f'{topic_key}.sdf')
     with open(generated_sdf, 'w', encoding='utf-8') as sdf_file:
         sdf_file.write(resolved_text)
 

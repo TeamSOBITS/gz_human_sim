@@ -5,11 +5,20 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# Let AUTOMOC process .hh headers (HumanControlPanel.hh uses that
+# extension, matching this package's existing plugin source convention).
+if(POLICY CMP0100)
+  cmake_policy(SET CMP0100 NEW)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(gz-plugin2 REQUIRED)
 find_package(gz-sim8 REQUIRED)
 find_package(gz-msgs10 REQUIRED)
 find_package(gz-transport13 REQUIRED)
+find_package(gz-gui8 REQUIRED)
+find_package(gz-rendering8 REQUIRED)
+find_package(Qt5 REQUIRED COMPONENTS Core)
 
 add_library(gz_human_actor_animation_control SHARED
   src/actor_animation_control_plugin.cpp
@@ -29,8 +38,33 @@ target_link_libraries(gz_human_actor_command
   gz-transport13::gz-transport13
 )
 
+# GUI plugin: spawns/removes/teleoperates gz_human_sim humans from the
+# Gazebo sidebar. Kept in its own lib/gz-gui search path, separate from
+# the gz-sim System plugins above (see GZ_GUI_PLUGIN_PATH env-hook below).
+add_library(HumanControlPanel SHARED
+  src/HumanControlPanel.cc
+  src/HumanControlPanel.hh
+  gui/HumanControlPanel.qrc
+)
+target_compile_features(HumanControlPanel PUBLIC cxx_std_17)
+set_target_properties(HumanControlPanel PROPERTIES
+  OUTPUT_NAME HumanControlPanel
+  INSTALL_RPATH_USE_LINK_PATH TRUE
+  AUTOMOC ON
+  AUTORCC ON
+)
+target_link_libraries(HumanControlPanel
+  gz-gui8::gz-gui8
+  gz-rendering8::gz-rendering8
+  gz-transport13::gz-transport13
+  gz-msgs10::gz-msgs10
+  Qt5::Core
+)
+
 install(PROGRAMS
   scripts/human_cmd_vel_controller.py
+  scripts/human_teleop_switcher.py
+  scripts/path_template.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -40,14 +74,22 @@ install(TARGETS
   DESTINATION lib
 )
 
+install(TARGETS
+  HumanControlPanel
+  DESTINATION lib/${PROJECT_NAME}/gz-gui
+)
+
 install(DIRECTORY
   config
+  gui
   launch
   models
   rviz
   scripts
   DESTINATION share/${PROJECT_NAME}
 )
+
+ament_environment_hooks(env-hooks/gz_human_sim.sh.in)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

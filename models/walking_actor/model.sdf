@@ -7,6 +7,10 @@
       name="gz_human_sim::ActorCommandPlugin">
       <vel_topic>/cmd_vel</vel_topic>
       <path_topic>/cmd_path</path_topic>
+      <remove_topic>/remove_actor</remove_topic>
+      <follow_mode_topic>/set_follow_mode</follow_mode_topic>
+      <!-- auto: path if one is active, else velocity (default) / path / velocity -->
+      <follow_mode>auto</follow_mode>
       <animation_name>walk</animation_name>
       <animation_factor>4.0</animation_factor>
       <linear_velocity>1.0</linear_velocity>

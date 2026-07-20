@@ -1,0 +1,2 @@
+ament_prepend_unique_value GZ_GUI_PLUGIN_PATH "$AMENT_CURRENT_PREFIX/lib/gz_human_sim/gz-gui"
+ament_prepend_unique_value LD_LIBRARY_PATH "$AMENT_CURRENT_PREFIX/lib/gz_human_sim/gz-gui"

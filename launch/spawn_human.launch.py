@@ -34,11 +34,13 @@ def _generate_custom_human_model(context):
         package_share, human_pose)
 
 
-def _resolve_walking_actor_model(context, namespace):
+def _resolve_actor_model(context, namespace, model_name):
     package_share = FindPackageShare('gz_human_sim').perform(context)
-    return _load_human_model_utils(context).resolve_walking_actor_model(
-        package_share, _actor_topic(namespace, 'cmd_vel'),
-        _actor_topic(namespace, 'cmd_path'))
+    follow_mode = LaunchConfiguration('follow_mode').perform(context)
+    return _load_human_model_utils(context).resolve_actor_model(
+        package_share, model_name, _actor_topic(namespace, 'cmd_vel'),
+        _actor_topic(namespace, 'cmd_path'), _actor_topic(namespace, 'remove_actor'),
+        _actor_topic(namespace, 'set_follow_mode'), follow_mode=follow_mode)
 
 
 def _spawn_human_cmd(context, *_args, **_kwargs):
@@ -52,27 +54,30 @@ def _spawn_human_cmd(context, *_args, **_kwargs):
     z = LaunchConfiguration('z').perform(context)
     yaw = LaunchConfiguration('yaw').perform(context)
 
+    actor_model_names = _load_human_model_utils(context).ACTOR_MODEL_NAMES
+
     if not model_file:
         if human_model == 'person_standing':
             model_file = PathJoinSubstitution([
-                FindPackageShare('sobits_gazebo_worlds'), 'models',
+                FindPackageShare('gz_human_sim'), 'models',
                 'person_standing', 'model.sdf']).perform(context)
-        elif human_model == 'walking_actor':
-            model_file = _resolve_walking_actor_model(context, namespace)
+        elif human_model in actor_model_names:
+            model_file = _resolve_actor_model(context, namespace, human_model)
         elif human_model == 'custom_human':
             model_file = _generate_custom_human_model(context)
         else:
             raise RuntimeError(
                 f"Unsupported human_model '{human_model}'. Use 'person_standing', "
-                "'walking_actor', 'custom_human', or pass model_file explicitly.")
+                f"one of {actor_model_names}, 'custom_human', or pass model_file "
+                "explicitly.")
 
     actions = []
-    if human_model == 'walking_actor':
+    if human_model in actor_model_names:
         velocity_topic = _actor_topic(namespace, 'cmd_vel')
         path_topic = _actor_topic(namespace, 'cmd_path')
         actions.append(Node(
             package='ros_gz_bridge', executable='parameter_bridge',
-            name='walking_actor_command_bridge', namespace=namespace,
+            name='actor_command_bridge', namespace=namespace,
             output='screen', arguments=[
                 f'{velocity_topic}@geometry_msgs/msg/Twist@gz.msgs.Twist',
                 f'{path_topic}@geometry_msgs/msg/PoseArray@gz.msgs.Pose_V',
@@ -103,9 +108,20 @@ def generate_launch_description():
         'model_name', default_value='gz_human', description='Spawned human model name')
     declare_human_model_cmd = DeclareLaunchArgument(
         'human_model', default_value='walking_actor',
-        description='Human model preset: person_standing, walking_actor, or custom_human')
+        description=(
+            'Human model preset: person_standing, custom_human, or an actor '
+            'model (walking_actor, DoctorFemaleWalk)'
+        ))
     declare_human_pose_cmd = DeclareLaunchArgument(
         'human_pose', default_value='cross_arms', description='Custom human pose preset')
+    declare_follow_mode_cmd = DeclareLaunchArgument(
+        'follow_mode', default_value='auto',
+        description=(
+            "ActorCommandPlugin command source (actor models only): 'auto' "
+            "(path takes over whenever one is active, else velocity -- the "
+            "default), 'path' (ignores teleop/cmd_vel entirely), or "
+            "'velocity' (ignores cmd_path entirely)"
+        ))
     declare_model_file_cmd = DeclareLaunchArgument(
         'model_file', default_value='', description='Optional explicit SDF file path')
     declare_x_cmd = DeclareLaunchArgument('x', default_value='-2.0', description='Spawn x position')
@@ -140,13 +156,15 @@ def generate_launch_description():
             'world_name': world_name, 'model_name': model_name,
             'x': x, 'y': y, 'z': z, 'yaw': yaw,
             'use_pose_controller': PythonExpression([
-                "'", human_model, "' != 'walking_actor'"]),
+                "'", human_model,
+                "' not in ('walking_actor', 'DoctorFemaleWalk')"]),
         }.items(), condition=IfCondition(LaunchConfiguration('enable_teleop')))
 
     return LaunchDescription([
         declare_namespace_cmd, declare_world_name_cmd, declare_enable_teleop_cmd,
         declare_device_cmd, declare_model_name_cmd, declare_human_model_cmd,
-        declare_human_pose_cmd, declare_model_file_cmd, declare_x_cmd, declare_y_cmd,
+        declare_human_pose_cmd, declare_follow_mode_cmd, declare_model_file_cmd,
+        declare_x_cmd, declare_y_cmd,
         declare_z_cmd, declare_yaw_cmd, set_gz_resource_path_human,
         set_gz_resource_path_worlds, human_set_pose_bridge,
         OpaqueFunction(function=_spawn_human_cmd), human_teleop,
