@@ -1,0 +1,83 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <model name="human_collision_body">
+    <!-- Invisible physics body that stands in for a gz_human_sim actor's
+         real-world footprint. Actors (see walking_actor/model.sdf,
+         DoctorFemaleWalk/model.sdf) are <actor> entities animated by
+         directly overwriting TrajectoryPose every tick -- a pure
+         kinematic teleport with zero physics/collision involvement (this
+         is a gz-sim limitation, not something specific to this package).
+         So instead of trying to collide the actor itself, this ordinary
+         dynamic <model> -- a simple standing cylinder with real mass and
+         collision -- is spawned alongside each actor, driven by the
+         stock gz-sim VelocityControl system (same commanded body-frame
+         velocity ActorCommandPlugin would otherwise apply directly), and
+         ActorCommandPlugin reads this body's own physics-resolved pose
+         back each tick to position the actor. Physics (not custom code)
+         is what makes walls/furniture actually stop it -- see
+         human_model_utils.py's resolve_collision_body_model() for how
+         the name/topic placeholders below get substituted per spawn.
+
+         No <visual> on purpose: this body is only ever meant to be felt,
+         not seen -- the actor's own skinned mesh is the visible human. -->
+    <static>false</static>
+    <link name="body">
+      <!-- Roughly adult-human: ~70 kg, standing cylinder 0.5 m diameter,
+           1.7 m tall, centered at half its own height so its base sits
+           on the ground plane like the actor models do. -->
+      <pose>0 0 0.85 0 0 0</pose>
+      <!-- Ixx/Iyy (resistance to toppling/rolling) are set absurdly high
+           on purpose, nowhere near a real human's ~17.87 -- confirmed by
+           direct testing that a physically-realistic value lets a single
+           forward-walk command tip this cylinder onto its side within
+           ~2 s (VelocityControl sets velocity directly rather than
+           applying it as a base-contact force, so the usual "wide stable
+           base" real-world assumption doesn't hold here the way it does
+           for, say, a wheeled robot). This body only ever needs to
+           translate in the XY plane and rotate about Z -- it's never
+           seen, so an unrealistically stiff roll/pitch response is a
+           fine trade against a tumbling collision volume. Izz is left at
+           the real value; it only governs yaw response, which is fine. -->
+      <inertial>
+        <mass>70.0</mass>
+        <inertia>
+          <ixx>5000.0</ixx>
+          <iyy>5000.0</iyy>
+          <izz>2.19</izz>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry>
+          <cylinder>
+            <radius>0.25</radius>
+            <length>1.7</length>
+          </cylinder>
+        </geometry>
+        <!-- Lower-than-default floor friction: reduces base-contact
+             torque (the actual tipping trigger above) further, without
+             meaningfully weakening how it blocks against walls (that's
+             a normal-force collision, not a friction one). -->
+        <surface>
+          <friction>
+            <ode>
+              <mu>0.2</mu>
+              <mu2>0.2</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <!-- topic is rewritten to /model/<spawn name>/cmd_vel by
+         resolve_collision_body_model(); ActorCommandPlugin publishes the
+         same body-frame (linear.x/y, angular.z) Twist it would otherwise
+         integrate itself, and gz-sim's physics engine moves this body
+         (respecting collisions with the world) in response. -->
+    <plugin filename="gz-sim-velocity-control-system"
+            name="gz::sim::systems::VelocityControl">
+      <topic>/model/human_collision_body/cmd_vel</topic>
+    </plugin>
+  </model>
+</sdf>

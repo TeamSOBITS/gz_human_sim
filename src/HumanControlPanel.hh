@@ -2,6 +2,7 @@
 #define GZ_HUMAN_SIM_HUMAN_CONTROL_PANEL_HH_
 
 #include <chrono>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -15,6 +16,7 @@
 #include <gz/gui/Plugin.hh>
 #include <gz/math/Pose3.hh>
 #include <gz/math/Vector3.hh>
+#include <gz/msgs/pose_v.pb.h>
 #include <gz/rendering/RenderTypes.hh>
 #include <gz/transport/Node.hh>
 
@@ -349,6 +351,44 @@ class HumanControlPanel : public gz::gui::Plugin
   /// graph, or as a [Err] line in the server's own log).
   private: bool QueryEntityExists(const std::string &_name);
 
+  /// \brief spawnHuman()'s original body (build launch arguments, start
+  /// the process, poll for confirmation) -- now only reached once _x/_y
+  /// are already known-safe: called directly for non-actor (static)
+  /// models, and via ProbeSafeSpawnPosition()/CheckProbeSettle() for
+  /// actor models, which may have shifted _x/_y away from what the user/
+  /// GUI originally asked for (see those two for why).
+  private: void StartRealSpawn(
+      int _modelIndex, QString _name, QString _posePreset, QString _followMode,
+      double _x, double _y, double _z, double _yaw);
+
+  /// \brief Spawns a throwaway, invisible probe (the same physics
+  /// collision body every actor gets paired with -- see
+  /// models/human_collision_body/model.sdf and collisionBodyTemplate) at
+  /// (_x, _y) and, once it's had a moment to settle, checks whether
+  /// gz-sim's own contact/penetration resolution pushed it away from
+  /// where it was dropped -- the same signal that made a bare (0,0)
+  /// spawn end up embedded in rcjo2025_arena's center wall. _attempt
+  /// indexes into the same kSpawnGridSpacing/kSpawnGridColumns grid
+  /// nextSpawnX()/nextSpawnY() already use, walked outward from the
+  /// original (_x, _y) until CheckProbeSettle() finds one that's clear,
+  /// or gives up after kSpawnSafetyMaxAttempts and spawns at the
+  /// original position anyway (better than refusing to spawn at all).
+  private: void ProbeSafeSpawnPosition(
+      int _modelIndex, QString _name, QString _posePreset, QString _followMode,
+      double _x, double _y, double _z, double _yaw, int _attempt);
+
+  /// \brief ProbeSafeSpawnPosition()'s follow-up, kSpawnSafetySettleMs
+  /// later: reads the probe's settled pose from the poses cache (see
+  /// OnPoseInfo()), removes the probe either way, and either proceeds to
+  /// StartRealSpawn() at (_candidateX, _candidateY) if it barely moved
+  /// from where it was dropped, or retries ProbeSafeSpawnPosition() at
+  /// the next grid slot if it got pushed away (still overlapping
+  /// something).
+  private: void CheckProbeSettle(
+      int _modelIndex, QString _name, QString _posePreset, QString _followMode,
+      double _x, double _y, double _z, double _yaw, int _attempt,
+      QString _probeName, double _candidateX, double _candidateY);
+
   /// \brief Poll QueryEntityExists() every ~500ms (up to ~10s) for a
   /// just-requested spawn. Finalizes the Human entry (list + publishers +
   /// diagonal-up viewpoint) only once the entity is confirmed to exist;
@@ -428,6 +468,13 @@ class HumanControlPanel : public gz::gui::Plugin
   /// a live Ctrl/Shift change).
   private: double EffectiveSpeedMultiplier() const;
 
+  /// \brief Handler for /world/<w>/dynamic_pose/info -- caches every
+  /// entity's live (x, y, z, yaw) in poses, keyed by name. Runs on a
+  /// transport thread; CheckProbeSettle() (Qt thread) reads it under
+  /// poseMutex. Same technique guide_robot's GuiderRobotManager already
+  /// uses for its own pose cache.
+  private: void OnPoseInfo(const gz::msgs::Pose_V &_message);
+
   private: gz::transport::Node node;
   private: std::vector<Human> humans;
   private: std::string worldName;
@@ -454,6 +501,29 @@ class HumanControlPanel : public gz::gui::Plugin
   // placed it at) -- see resetToInitialView().
   private: gz::math::Pose3d initialCameraPose;
   private: bool initialCameraPoseCaptured{false};
+
+  private: struct CachedPose
+  {
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
+    double yaw{0.0};
+    bool valid{false};
+  };
+  /// \brief Live entity poses keyed by name, from OnPoseInfo() -- written
+  /// on a transport thread, read (under poseMutex) on the Qt thread by
+  /// CheckProbeSettle().
+  private: std::mutex poseMutex;
+  private: std::map<std::string, CachedPose> poses;
+  private: bool poseSubscribed{false};
+
+  /// \brief Raw text of models/human_collision_body/model.sdf, read once
+  /// in LoadConfig() and reused by every ProbeSafeSpawnPosition() call
+  /// (each spawn attempt just substitutes a fresh throwaway model name).
+  /// Empty if the file couldn't be found, in which case the safety probe
+  /// is skipped entirely and spawning proceeds unchecked, same as before
+  /// this feature existed.
+  private: std::string collisionBodyTemplate;
 
   signals: void humansChanged();
   signals: void StatusChanged();

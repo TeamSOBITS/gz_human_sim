@@ -34,14 +34,23 @@ def _generate_custom_human_model(context):
         package_share, human_pose)
 
 
-def _resolve_actor_model(context, namespace, model_name):
+def _resolve_actor_model(context, namespace, model_name, collision_model_name,
+                          collision_cmd_vel_topic):
     package_share = FindPackageShare('gz_human_sim').perform(context)
     follow_mode = LaunchConfiguration('follow_mode').perform(context)
     return _load_human_model_utils(context).resolve_actor_model(
         package_share, model_name, _actor_topic(namespace, 'cmd_vel'),
         _actor_topic(namespace, 'cmd_path'), _actor_topic(namespace, 'remove_actor'),
         _actor_topic(namespace, 'set_follow_mode'),
-        jump_topic=_actor_topic(namespace, 'cmd_jump'), follow_mode=follow_mode)
+        jump_topic=_actor_topic(namespace, 'cmd_jump'),
+        collision_model_name=collision_model_name,
+        collision_cmd_vel_topic=collision_cmd_vel_topic, follow_mode=follow_mode)
+
+
+def _resolve_collision_body_model(context, collision_model_name, collision_cmd_vel_topic):
+    package_share = FindPackageShare('gz_human_sim').perform(context)
+    return _load_human_model_utils(context).resolve_collision_body_model(
+        package_share, collision_model_name, collision_cmd_vel_topic)
 
 
 def _spawn_human_cmd(context, *_args, **_kwargs):
@@ -57,13 +66,26 @@ def _spawn_human_cmd(context, *_args, **_kwargs):
 
     actor_model_names = _load_human_model_utils(context).ACTOR_MODEL_NAMES
 
+    # Physics collision body (see models/human_collision_body/model.sdf):
+    # a plain dynamic <model> with real mass/collision that ActorCommandPlugin
+    # drives over collision_cmd_vel_topic and reads the resolved pose back
+    # from each tick, since the actor itself (a <actor>/TrajectoryPose
+    # kinematic teleport) never participates in physics collision on its
+    # own. Named off model_name so it's easy to spot alongside the human
+    # it belongs to; only spawned for actor_model_names below (person_
+    # standing/custom_human are static, they don't move at all).
+    collision_model_name = f'{model_name}_collision'
+    collision_cmd_vel_topic = f'/model/{collision_model_name}/cmd_vel'
+
     if not model_file:
         if human_model == 'person_standing':
             model_file = PathJoinSubstitution([
                 FindPackageShare('gz_human_sim'), 'models',
                 'person_standing', 'model.sdf']).perform(context)
         elif human_model in actor_model_names:
-            model_file = _resolve_actor_model(context, namespace, human_model)
+            model_file = _resolve_actor_model(
+                context, namespace, human_model,
+                collision_model_name, collision_cmd_vel_topic)
         elif human_model == 'custom_human':
             model_file = _generate_custom_human_model(context)
         else:
@@ -82,6 +104,20 @@ def _spawn_human_cmd(context, *_args, **_kwargs):
             output='screen', arguments=[
                 f'{velocity_topic}@geometry_msgs/msg/Twist@gz.msgs.Twist',
                 f'{path_topic}@geometry_msgs/msg/PoseArray@gz.msgs.Pose_V',
+            ]))
+
+        collision_body_file = _resolve_collision_body_model(
+            context, collision_model_name, collision_cmd_vel_topic)
+        # Ground level (z=0), not the actor's own x/y/z/yaw z: the
+        # collision body's link pose already bakes in standing height from
+        # a ground-level root (see model.sdf), independently of whatever
+        # per-model mesh-origin z offset the actor's own -z carries.
+        actions.append(Node(
+            package='ros_gz_sim', executable='create', name='spawn_human_collision',
+            namespace=namespace, output='screen', arguments=[
+                '-world', world_name, '-file', collision_body_file,
+                '-name', collision_model_name,
+                '-x', x, '-y', y, '-z', '0.0', '-Y', yaw,
             ]))
 
     actions.append(Node(

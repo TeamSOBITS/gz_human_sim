@@ -10,6 +10,8 @@
       <remove_topic>/remove_actor</remove_topic>
       <follow_mode_topic>/set_follow_mode</follow_mode_topic>
       <jump_topic>/cmd_jump</jump_topic>
+      <collision_model_name></collision_model_name>
+      <collision_cmd_vel_topic></collision_cmd_vel_topic>
       <!-- auto: path if one is active, else velocity (default) / path / velocity -->
       <follow_mode>auto</follow_mode>
       <animation_name>walk</animation_name>

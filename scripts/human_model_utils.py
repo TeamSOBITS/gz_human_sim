@@ -22,6 +22,7 @@ ACTOR_MODEL_NAMES = ('walking_actor', 'DoctorFemaleWalk')
 
 def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
                          remove_topic, follow_mode_topic, jump_topic='/cmd_jump',
+                         collision_model_name='', collision_cmd_vel_topic='',
                          follow_mode='auto', animation_name='walk', animation_factor=4.0,
                          linear_velocity=1.0, linear_tolerance=0.1):
     """Return a path to a <model_name> model.sdf ready for runtime spawn.
@@ -73,6 +74,12 @@ def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
         resolved_text = resolved_text.replace(
             '<jump_topic>/cmd_jump</jump_topic>', f'<jump_topic>{jump_topic}</jump_topic>', 1)
         resolved_text = resolved_text.replace(
+            '<collision_model_name></collision_model_name>',
+            f'<collision_model_name>{collision_model_name}</collision_model_name>', 1)
+        resolved_text = resolved_text.replace(
+            '<collision_cmd_vel_topic></collision_cmd_vel_topic>',
+            f'<collision_cmd_vel_topic>{collision_cmd_vel_topic}</collision_cmd_vel_topic>', 1)
+        resolved_text = resolved_text.replace(
             '<follow_mode>auto</follow_mode>', f'<follow_mode>{follow_mode}</follow_mode>', 1)
     else:
         plugin_block = (
@@ -83,6 +90,8 @@ def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
             f'<remove_topic>{remove_topic}</remove_topic>'
             f'<follow_mode_topic>{follow_mode_topic}</follow_mode_topic>'
             f'<jump_topic>{jump_topic}</jump_topic>'
+            f'<collision_model_name>{collision_model_name}</collision_model_name>'
+            f'<collision_cmd_vel_topic>{collision_cmd_vel_topic}</collision_cmd_vel_topic>'
             f'<follow_mode>{follow_mode}</follow_mode>'
             f'<animation_name>{animation_name}</animation_name>'
             f'<animation_factor>{animation_factor}</animation_factor>'
@@ -100,6 +109,45 @@ def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
     os.makedirs(cache_dir, exist_ok=True)
     topic_key = re.sub(r'[^A-Za-z0-9_.-]', '_', f'{model_name}_{velocity_topic}')
     generated_sdf = os.path.join(cache_dir, f'{topic_key}.sdf')
+    with open(generated_sdf, 'w', encoding='utf-8') as sdf_file:
+        sdf_file.write(resolved_text)
+
+    return generated_sdf
+
+
+def resolve_collision_body_model(package_share, spawn_name, cmd_vel_topic):
+    """Return a path to a human_collision_body model.sdf ready to spawn
+    alongside an actor named spawn_name, with its VelocityControl plugin
+    listening on cmd_vel_topic.
+
+    See models/human_collision_body/model.sdf's own comment for why this
+    body exists at all: gz-sim actors are pure kinematic TrajectoryPose
+    overwrites with no physics/collision involvement, so this ordinary
+    dynamic model (with real mass + collision) stands in for the actor's
+    footprint instead -- ActorCommandPlugin drives it over cmd_vel_topic
+    and reads its physics-resolved pose back each tick (see
+    collision_model_name/collision_cmd_vel_topic in resolve_actor_model()
+    above). No plugin-library path rewriting is needed here (unlike
+    resolve_actor_model()) since VelocityControl is a stock gz-sim system,
+    not one this package builds.
+    """
+    model_dir = os.path.join(package_share, 'models', 'human_collision_body')
+    source_sdf = os.path.join(model_dir, 'model.sdf')
+
+    with open(source_sdf, 'r', encoding='utf-8') as sdf_file:
+        sdf_text = sdf_file.read()
+
+    resolved_text = sdf_text.replace(
+        '<model name="human_collision_body">',
+        f'<model name="{spawn_name}">', 1)
+    resolved_text = resolved_text.replace(
+        '<topic>/model/human_collision_body/cmd_vel</topic>',
+        f'<topic>{cmd_vel_topic}</topic>', 1)
+
+    cache_dir = os.path.join(tempfile.gettempdir(), 'gz_human_sim')
+    os.makedirs(cache_dir, exist_ok=True)
+    name_key = re.sub(r'[^A-Za-z0-9_.-]', '_', spawn_name)
+    generated_sdf = os.path.join(cache_dir, f'{name_key}_collision.sdf')
     with open(generated_sdf, 'w', encoding='utf-8') as sdf_file:
         sdf_file.write(resolved_text)
 

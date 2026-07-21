@@ -6,7 +6,9 @@
 #include <csignal>
 #include <dlfcn.h>
 #include <fstream>
+#include <memory>
 #include <regex>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -22,6 +24,7 @@
 #include <gz/msgs/double.pb.h>
 #include <gz/msgs/empty.pb.h>
 #include <gz/msgs/entity.pb.h>
+#include <gz/msgs/entity_factory.pb.h>
 #include <gz/msgs/pose_v.pb.h>
 #include <gz/msgs/serialized_map.pb.h>
 #include <gz/msgs/stringmsg.pb.h>
@@ -91,6 +94,22 @@ static const char *const kPathTemplateLabels[kPathTemplateCount] = {"円", "四�
 // in a grid instead of stacking them on top of each other at (0, 0).
 static constexpr double kSpawnGridSpacing = 1.2;
 static constexpr int kSpawnGridColumns = 4;
+
+// ProbeSafeSpawnPosition()/CheckProbeSettle(): how many grid slots to try
+// before giving up and spawning at the original position regardless; how
+// fast the probe walks in from kSpawnGridSpacing south of the candidate
+// (same order of magnitude as normal teleop walking speed); how long it
+// gets to complete that walk-in before its pose is trusted (must clear
+// kSpawnGridSpacing / kSpawnProbeSpeed = 1.2 s at the values below, plus
+// margin for acceleration and the discovery-race republishes just before
+// it); and how much of that kSpawnGridSpacing walk-in it's allowed to have
+// come up short by (measured from where it STARTED, not the candidate --
+// see CheckProbeSettle()'s comment for why) and still count as "made it",
+// vs. "got stopped partway by something".
+static constexpr int kSpawnSafetyMaxAttempts = 8;
+static constexpr double kSpawnProbeSpeed = 1.0;
+static constexpr int kSpawnSafetySettleMs = 2200;
+static constexpr double kSpawnSafetyDisplacementMeters = 0.3;
 
 // Entity-existence polling: gz-sim's create/remove services ack the
 // request, not the outcome, so spawn/removal are confirmed by polling
@@ -283,6 +302,19 @@ void HumanControlPanel::LoadConfig(const tinyxml2::XMLElement *)
   if (this->posePresetList.isEmpty())
     this->posePresetList << "cross_arms";
 
+  // ProbeSafeSpawnPosition()'s throwaway probes reuse this template
+  // verbatim (each attempt only substitutes a fresh model name) -- see
+  // its own comment for why a probe is just this same collision body.
+  const std::string collisionBodyPath =
+      packagePrefix + "/share/gz_human_sim/models/human_collision_body/model.sdf";
+  std::ifstream collisionBodyFile(collisionBodyPath);
+  if (collisionBodyFile)
+  {
+    std::ostringstream buffer;
+    buffer << collisionBodyFile.rdbuf();
+    this->collisionBodyTemplate = buffer.str();
+  }
+
   // Viewpoint commands touch the Ogre2 scene, which is only safe from the
   // render thread; watch Render events like GuiderRobotManager does. Render
   // events are only ever sent to MainWindow, so a filter there is enough
@@ -456,10 +488,38 @@ void HumanControlPanel::DiscoverWorld()
     this->worldName = worlds.data(0);
     this->SetStatus(
         QString::fromStdString("接続済み · world: " + this->worldName));
+    // CheckProbeSettle() needs live poses of the throwaway spawn-safety
+    // probes (see ProbeSafeSpawnPosition()); this is the same
+    // dynamic_pose/info topic guide_robot's GuiderRobotManager already
+    // subscribes to for its own pose cache.
+    if (!this->poseSubscribed)
+    {
+      this->poseSubscribed = this->node.Subscribe(
+          "/world/" + this->worldName + "/dynamic_pose/info",
+          &HumanControlPanel::OnPoseInfo, this);
+    }
     return;
   }
 
   QTimer::singleShot(500, this, &HumanControlPanel::DiscoverWorld);
+}
+
+void HumanControlPanel::OnPoseInfo(const gz::msgs::Pose_V &_message)
+{
+  std::lock_guard<std::mutex> lock(this->poseMutex);
+  for (int i = 0; i < _message.pose_size(); ++i)
+  {
+    const auto &pose = _message.pose(i);
+    auto &cached = this->poses[pose.name()];
+    cached.x = pose.position().x();
+    cached.y = pose.position().y();
+    cached.z = pose.position().z();
+    const auto &q = pose.orientation();
+    cached.yaw = std::atan2(
+        2.0 * (q.w() * q.z() + q.x() * q.y()),
+        1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z()));
+    cached.valid = true;
+  }
 }
 
 QStringList HumanControlPanel::HumanModels() const
@@ -841,6 +901,22 @@ void HumanControlPanel::spawnHuman(
     return;
   }
 
+  // Actor-backed models get the collision-body probe first (rcjo2025_arena
+  // spawning its first human at the (0,0) grid default -- which happens to
+  // land inside that world's center wall -- is exactly the case this
+  // exists for); static models (person_standing/custom_human) have no
+  // paired collision body to probe with, so they just spawn where asked,
+  // same as before this feature existed.
+  if (IsActorIndex(_modelIndex))
+    this->ProbeSafeSpawnPosition(_modelIndex, name, _posePreset, _followMode, _x, _y, _z, _yaw, 0);
+  else
+    this->StartRealSpawn(_modelIndex, name, _posePreset, _followMode, _x, _y, _z, _yaw);
+}
+
+void HumanControlPanel::StartRealSpawn(
+    int _modelIndex, QString _name, QString _posePreset, QString _followMode,
+    double _x, double _y, double _z, double _yaw)
+{
   const QString model = kHumanModels[_modelIndex];
   QStringList arguments;
   arguments << "launch" << "gz_human_sim" << "spawn_human.launch.py"
@@ -852,8 +928,8 @@ void HumanControlPanel::spawnHuman(
             // the unnamespaced /cmd_vel and the teleop pad silently does
             // nothing (also breaks human_teleop_switcher.py, which publishes
             // to the namespaced /human1,2/cmd_vel ROS topics by name).
-            << "namespace:=" + name
-            << "model_name:=" + name
+            << "namespace:=" + _name
+            << "model_name:=" + _name
             << "human_model:=" + model
             << "enable_teleop:=false"
             << "x:=" + QString::number(_x) << "y:=" + QString::number(_y)
@@ -866,17 +942,173 @@ void HumanControlPanel::spawnHuman(
   auto *process = this->StartLaunchProcess(arguments);
   if (!process)
   {
-    this->SetStatus(name + " の起動に失敗しました");
+    this->SetStatus(_name + " の起動に失敗しました");
     return;
   }
 
-  this->SetStatus(name + " をspawn中…（存在確認待ち）");
+  this->SetStatus(_name + " をspawn中…（存在確認待ち）");
   QTimer::singleShot(kEntityPollIntervalMs, this,
-      [this, name, model, followMode = _followMode, process = QPointer<QProcess>(process),
+      [this, _name, model, followMode = _followMode, process = QPointer<QProcess>(process),
        _x, _y, _z, _yaw]()
       {
-        this->PollSpawnConfirmation(name, model, followMode, process, _x, _y, _z, _yaw, 0);
+        this->PollSpawnConfirmation(_name, model, followMode, process, _x, _y, _z, _yaw, 0);
       });
+}
+
+void HumanControlPanel::ProbeSafeSpawnPosition(
+    int _modelIndex, QString _name, QString _posePreset, QString _followMode,
+    double _x, double _y, double _z, double _yaw, int _attempt)
+{
+  if (_attempt >= kSpawnSafetyMaxAttempts || this->collisionBodyTemplate.empty())
+  {
+    // Gave up finding a clear spot (or never had a template to probe
+    // with) -- spawn at the originally-requested position anyway rather
+    // than refusing outright; a possibly-embedded spawn the user can see
+    // and fix is better than a silent no-op.
+    if (_attempt >= kSpawnSafetyMaxAttempts)
+    {
+      this->SetStatus(_name + "：安全なスポーン地点が見つからなかったため、"
+          "指定座標にそのままスポーンします");
+    }
+    this->StartRealSpawn(_modelIndex, _name, _posePreset, _followMode, _x, _y, _z, _yaw);
+    return;
+  }
+
+  // Same grid ProbeSafeSpawnPosition()'s caller (nextSpawnX()/Y()) used to
+  // pick _x/_y in the first place, just walked outward from THIS attempt's
+  // starting point instead of from (0, 0) -- attempt 0 always tests the
+  // original position first.
+  const double candidateX = _x + (_attempt % kSpawnGridColumns) * kSpawnGridSpacing;
+  const double candidateY = _y + (_attempt / kSpawnGridColumns) * kSpawnGridSpacing;
+
+  const std::string probeName = "__spawn_probe_" + _name.toStdString() +
+      "_" + std::to_string(_attempt);
+  const std::string probeTopic = "/model/" + probeName + "/cmd_vel";
+  std::string probeSdf = this->collisionBodyTemplate;
+  const std::string namePlaceholder = "<model name=\"human_collision_body\">";
+  const auto namePos = probeSdf.find(namePlaceholder);
+  if (namePos != std::string::npos)
+  {
+    probeSdf.replace(namePos, namePlaceholder.size(),
+        "<model name=\"" + probeName + "\">");
+  }
+  // Give this probe its OWN VelocityControl topic -- reusing the
+  // template's unmodified placeholder topic would make every simultaneous
+  // probe (and any real, already-spawned collision body still using the
+  // template's literal default) fight over the same one.
+  const std::string topicPlaceholder =
+      "<topic>/model/human_collision_body/cmd_vel</topic>";
+  const auto topicPos = probeSdf.find(topicPlaceholder);
+  if (topicPos != std::string::npos)
+  {
+    probeSdf.replace(topicPos, topicPlaceholder.size(),
+        "<topic>" + probeTopic + "</topic>");
+  }
+
+  // Confirmed by direct testing (see the commit this landed in): a probe
+  // simply DROPPED at an already-overlapping candidate does NOT get
+  // pushed back out by gz-sim's own contact resolution -- a symmetric,
+  // velocity-free interpenetration with a static body just sits there
+  // indefinitely instead of separating. So instead, this spawns the probe
+  // one grid cell short of the candidate (south of it, along -Y, a
+  // direction guaranteed clear of the SAME obstacle unless that obstacle
+  // happens to be at least kSpawnGridSpacing wide there too) and drives
+  // it toward the candidate at a normal walking speed -- exactly the
+  // already-verified "a moving body cleanly stops at a wall's surface"
+  // behavior real teleop movement relies on (see actor_command_plugin.cpp).
+  // CheckProbeSettle() then checks how far it actually got.
+  const double approachStartY = candidateY - kSpawnGridSpacing;
+
+  gz::msgs::EntityFactory request;
+  request.set_sdf(probeSdf);
+  request.set_name(probeName);
+  request.mutable_pose()->mutable_position()->set_x(candidateX);
+  request.mutable_pose()->mutable_position()->set_y(approachStartY);
+  request.mutable_pose()->mutable_position()->set_z(0.0);
+
+  gz::msgs::Boolean response;
+  bool result = false;
+  const bool executed = this->node.Request(
+      "/world/" + this->worldName + "/create", request, 2000u, response, result);
+  if (!executed || !result || !response.data())
+  {
+    // Couldn't even spawn the probe -- don't block the real spawn on a
+    // safety check that isn't working right now.
+    this->StartRealSpawn(_modelIndex, _name, _posePreset, _followMode, _x, _y, _z, _yaw);
+    return;
+  }
+
+  // gz-transport publisher/subscriber discovery is asynchronous -- a
+  // Publish() called immediately after Advertise() can easily lose the
+  // race and never reach the probe's VelocityControl system before this
+  // handle would otherwise go out of scope. Kept alive (shared_ptr,
+  // captured by value below) and re-published a couple of times over the
+  // first moment of the settle window to survive that race; a one-shot
+  // command is otherwise enough since VelocityControl holds the last
+  // velocity it received, same as real teleop relies on.
+  auto probePublisher = std::make_shared<gz::transport::Node::Publisher>(
+      this->node.Advertise<gz::msgs::Twist>(probeTopic));
+  gz::msgs::Twist probeTwist;
+  probeTwist.mutable_linear()->set_y(kSpawnProbeSpeed);
+  probePublisher->Publish(probeTwist);
+  QTimer::singleShot(100, this, [probePublisher, probeTwist]() { probePublisher->Publish(probeTwist); });
+  QTimer::singleShot(300, this, [probePublisher, probeTwist]() { probePublisher->Publish(probeTwist); });
+
+  QTimer::singleShot(kSpawnSafetySettleMs, this,
+      [this, _modelIndex, _name, _posePreset, _followMode, _x, _y, _z, _yaw, _attempt,
+       probeName = QString::fromStdString(probeName), candidateX, candidateY, probePublisher]()
+      {
+        this->CheckProbeSettle(_modelIndex, _name, _posePreset, _followMode, _x, _y, _z, _yaw,
+            _attempt, probeName, candidateX, candidateY);
+      });
+}
+
+void HumanControlPanel::CheckProbeSettle(
+    int _modelIndex, QString _name, QString _posePreset, QString _followMode,
+    double _x, double _y, double _z, double _yaw, int _attempt,
+    QString _probeName, double _candidateX, double _candidateY)
+{
+  const std::string probeNameStd = _probeName.toStdString();
+  // Safe means "travelled roughly the full kSpawnGridSpacing walk in from
+  // the south", checked as distance from its OWN START point rather than
+  // proximity to the candidate -- deliberately, since nothing ever tells
+  // the probe to stop once it arrives (VelocityControl just keeps it
+  // going), so an unobstructed probe overshoots the candidate by however
+  // much extra time it got before this check ran. Measuring from the
+  // start instead means overshoot only makes "safe" more obviously true
+  // rather than corrupting the read the way distance-from-candidate would.
+  // No pose yet (never confirmed moving at all) counts as NOT safe -- a
+  // probe that should have had a full kSpawnSafetySettleMs to walk in and
+  // simply never reported a position is more likely stuck than fine.
+  const double approachStartX = _candidateX;
+  const double approachStartY = _candidateY - kSpawnGridSpacing;
+  bool safe = false;
+  {
+    std::lock_guard<std::mutex> lock(this->poseMutex);
+    const auto it = this->poses.find(probeNameStd);
+    if (it != this->poses.end() && it->second.valid)
+    {
+      const double distanceFromStart =
+          std::hypot(it->second.x - approachStartX, it->second.y - approachStartY);
+      safe = distanceFromStart >= (kSpawnGridSpacing - kSpawnSafetyDisplacementMeters);
+    }
+    this->poses.erase(probeNameStd);
+  }
+  // Always clean up the probe, safe or not -- it was only ever a test.
+  this->RequestEntityRemoval(probeNameStd);
+
+  if (safe)
+  {
+    this->StartRealSpawn(
+        _modelIndex, _name, _posePreset, _followMode, _candidateX, _candidateY, _z, _yaw);
+  }
+  else
+  {
+    this->SetStatus(_name + "：候補地点(" + QString::number(_candidateX) + ", " +
+        QString::number(_candidateY) + ")が障害物と重なっていたため、別の位置を試します");
+    this->ProbeSafeSpawnPosition(
+        _modelIndex, _name, _posePreset, _followMode, _x, _y, _z, _yaw, _attempt + 1);
+  }
 }
 
 void HumanControlPanel::PollSpawnConfirmation(

@@ -20,6 +20,7 @@
 #include <gz/sim/Actor.hh>
 #include <gz/sim/System.hh>
 #include <gz/sim/components/Actor.hh>
+#include <gz/sim/components/Name.hh>
 #include <gz/sim/components/Pose.hh>
 #include <gz/transport/Node.hh>
 #include <sdf/Element.hh>
@@ -54,6 +55,21 @@ class ActorCommandPlugin
     this->linearVelocity = _sdf->Get<double>("linear_velocity", 1.0).first;
     this->linearTolerance = _sdf->Get<double>("linear_tolerance", 0.1).first;
     this->turnRate = _sdf->Get<double>("turn_rate", 2.5).first;
+    // Physics collision body (see models/human_collision_body/model.sdf
+    // and HumanControlPanel/spawn_human.launch.py's spawn flow): this
+    // actor is a pure kinematic TrajectoryPose teleport with no collision
+    // of its own, so when these are set, PreUpdate() drives that separate
+    // dynamic model over collisionCmdVelTopic instead of self-integrating
+    // its own X/Y/yaw, and copies that body's physics-resolved pose back
+    // each tick. Left empty (the default for any actor spawned without
+    // this wiring, e.g. a hand-authored world SDF), PreUpdate() falls
+    // back to the original self-integrated motion, uncollided.
+    this->collisionModelName = _sdf->Get<std::string>("collision_model_name", "").first;
+    this->collisionCmdVelTopic =
+        _sdf->Get<std::string>("collision_cmd_vel_topic", "").first;
+    if (!this->collisionCmdVelTopic.empty())
+      this->collisionPublisher =
+          this->transportNode.Advertise<gz::msgs::Twist>(this->collisionCmdVelTopic);
     // "auto" (default): path takes over whenever one is queued/active,
     // otherwise velocity. "path"/"velocity" pin the actor to just one
     // command source, matching gazebo-ros-actor-plugin's follow_mode
@@ -157,6 +173,17 @@ class ActorCommandPlugin
         // restriction, so that's what HumanControlPanel's remove button
         // actually triggers for actor-backed humans (see remove_topic).
         gzmsg << "ActorCommandPlugin: removing self on request." << std::endl;
+        // Take the companion collision body (see Configure()'s comment)
+        // down with it -- it's a plain MODEL, so unlike the actor itself
+        // it has no restriction against RequestRemoveEntity(), it would
+        // just otherwise be left behind as an orphaned invisible body.
+        if (this->collisionEntity == gz::sim::kNullEntity && !this->collisionModelName.empty())
+        {
+          this->collisionEntity = _ecm.EntityByComponents(
+              gz::sim::components::Name(this->collisionModelName));
+        }
+        if (this->collisionEntity != gz::sim::kNullEntity)
+          _ecm.RequestRemoveEntity(this->collisionEntity, true);
         _ecm.RequestRemoveEntity(this->entity, true);
         return;
       }
@@ -195,6 +222,10 @@ class ActorCommandPlugin
     if (!pathApplied && followMode != "path")
     {
       const double yaw = currentPose.Rot().Yaw();
+      double bodyLinear = this->velocity.linear;
+      double bodyLateral = this->velocity.lateral;
+      double bodyAngularRate = this->velocity.angular;
+      double kinematicYaw = yaw;
       if (this->velocity.turnToFace)
       {
         // Steer the actual current yaw toward an ABSOLUTE world target
@@ -212,13 +243,9 @@ class ActorCommandPlugin
         while (diff <= -M_PI) diff += 2.0 * M_PI;
         const double maxStep = this->turnRate * dt;
         const double turnStep = std::clamp(diff, -maxStep, maxStep);
-        const double newYaw = yaw + turnStep;
-        const double dx = this->velocity.linear * std::cos(yaw) * dt;
-        const double dy = this->velocity.linear * std::sin(yaw) * dt;
-        nextPose.Pos().X(currentPose.Pos().X() + dx);
-        nextPose.Pos().Y(currentPose.Pos().Y() + dy);
-        nextPose.Rot() = gz::math::Quaterniond(0.0, 0.0, newYaw);
-        distanceTravelled = std::hypot(dx, dy);
+        bodyLateral = 0.0;
+        bodyAngularRate = dt > 0.0 ? turnStep / dt : 0.0;
+        kinematicYaw = yaw + turnStep;
       }
       else
       {
@@ -227,14 +254,70 @@ class ActorCommandPlugin
         // steering combo, and the S+A/S+D in-place spin -- all of which
         // already want continuous rotation without any "steer toward a
         // fixed heading" behavior.
-        const double dx = (this->velocity.linear * std::cos(yaw) -
-            this->velocity.lateral * std::sin(yaw)) * dt;
-        const double dy = (this->velocity.linear * std::sin(yaw) +
-            this->velocity.lateral * std::cos(yaw)) * dt;
+        kinematicYaw = yaw + bodyAngularRate * dt;
+      }
+
+      bool syncedFromCollisionBody = false;
+      if (!this->collisionCmdVelTopic.empty())
+      {
+        // Drive the invisible physics body (see models/
+        // human_collision_body/model.sdf) with the exact same body-frame
+        // velocity this tick would otherwise have self-integrated
+        // directly, then read back wherever physics/collisions actually
+        // let it end up, instead of trusting our own uncollided math --
+        // this is what stops the actor at walls/furniture instead of
+        // walking through them. Resolved lazily/every tick until found,
+        // since the companion model may still be mid-spawn for the first
+        // few ticks after this actor's own Configure() runs.
+        if (this->collisionPublisher.Valid())
+        {
+          gz::msgs::Twist collisionTwist;
+          collisionTwist.mutable_linear()->set_x(bodyLinear);
+          collisionTwist.mutable_linear()->set_y(bodyLateral);
+          collisionTwist.mutable_angular()->set_z(bodyAngularRate);
+          this->collisionPublisher.Publish(collisionTwist);
+        }
+        if (this->collisionEntity == gz::sim::kNullEntity && !this->collisionModelName.empty())
+        {
+          this->collisionEntity = _ecm.EntityByComponents(
+              gz::sim::components::Name(this->collisionModelName));
+        }
+        if (this->collisionEntity != gz::sim::kNullEntity)
+        {
+          auto collisionPose = _ecm.Component<gz::sim::components::Pose>(
+              this->collisionEntity);
+          if (collisionPose != nullptr)
+          {
+            const gz::math::Pose3d resolved = collisionPose->Data();
+            const double dx = resolved.Pos().X() - currentPose.Pos().X();
+            const double dy = resolved.Pos().Y() - currentPose.Pos().Y();
+            nextPose.Pos().X(resolved.Pos().X());
+            nextPose.Pos().Y(resolved.Pos().Y());
+            nextPose.Rot() = gz::math::Quaterniond(0.0, 0.0, resolved.Rot().Yaw());
+            distanceTravelled = std::hypot(dx, dy);
+            syncedFromCollisionBody = true;
+          }
+          else
+          {
+            // Entity existed under that name but isn't a real pose-bearing
+            // model (or vanished) -- stop trusting the cached id and fall
+            // back to uncollided motion below until a fresh lookup finds
+            // it again.
+            this->collisionEntity = gz::sim::kNullEntity;
+          }
+        }
+      }
+      if (!syncedFromCollisionBody)
+      {
+        // No collision body configured, or it hasn't appeared in the ECM
+        // yet -- fall back to the original uncollided kinematic estimate
+        // so the actor still moves smoothly instead of freezing while
+        // waiting for the companion to spawn.
+        const double dx = (bodyLinear * std::cos(yaw) - bodyLateral * std::sin(yaw)) * dt;
+        const double dy = (bodyLinear * std::sin(yaw) + bodyLateral * std::cos(yaw)) * dt;
         nextPose.Pos().X(currentPose.Pos().X() + dx);
         nextPose.Pos().Y(currentPose.Pos().Y() + dy);
-        nextPose.Rot() = gz::math::Quaterniond(0.0, 0.0,
-            yaw + this->velocity.angular * dt);
+        nextPose.Rot() = gz::math::Quaterniond(0.0, 0.0, kinematicYaw);
         distanceTravelled = std::hypot(dx, dy);
       }
     }
@@ -481,6 +564,14 @@ class ActorCommandPlugin
   // independently of linear_velocity; defaults to the same rate the old
   // GUI-side two-phase turn used (kTeleopTurnRate in HumanControlPanel.cc).
   private: double turnRate{2.5};
+  // Companion physics collision body wiring -- see Configure()'s comment
+  // and the collision-body block in PreUpdate(). collisionEntity is
+  // resolved lazily (kNullEntity until EntityByComponents() finds a match)
+  // since the companion model may spawn a few ticks after this actor.
+  private: std::string collisionModelName;
+  private: std::string collisionCmdVelTopic;
+  private: gz::transport::Node::Publisher collisionPublisher;
+  private: gz::sim::Entity collisionEntity{gz::sim::kNullEntity};
   // Jump state, integrated as a Z-only parabolic arc each PreUpdate tick --
   // see the jump block there and JumpCallback(). kGravity only needs to be
   // physically plausible (it just shapes the arc), not an exact match to
