@@ -40,7 +40,8 @@ def _resolve_actor_model(context, namespace, model_name):
     return _load_human_model_utils(context).resolve_actor_model(
         package_share, model_name, _actor_topic(namespace, 'cmd_vel'),
         _actor_topic(namespace, 'cmd_path'), _actor_topic(namespace, 'remove_actor'),
-        _actor_topic(namespace, 'set_follow_mode'), follow_mode=follow_mode)
+        _actor_topic(namespace, 'set_follow_mode'),
+        jump_topic=_actor_topic(namespace, 'cmd_jump'), follow_mode=follow_mode)
 
 
 def _spawn_human_cmd(context, *_args, **_kwargs):

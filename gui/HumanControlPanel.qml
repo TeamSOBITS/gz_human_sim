@@ -303,7 +303,7 @@ Rectangle {
             Repeater {
               model: [
                 {key: "Q", glyph: "↖"}, {key: "W", glyph: "↑"}, {key: "E", glyph: "↗"},
-                {key: "A", glyph: "←"}, {key: "S", glyph: "■"}, {key: "D", glyph: "→"},
+                {key: "A", glyph: "←"}, {key: "N", glyph: "■"}, {key: "D", glyph: "→"},
                 {key: "Z", glyph: "↙"}, {key: "X", glyph: "↓"}, {key: "C", glyph: "↘"},
               ]
               delegate: Button {
@@ -316,15 +316,22 @@ Rectangle {
                   wrapMode: Text.WordWrap
                   font.pixelSize: 12
                 }
-                // Shift+click (Shift held on the keyboard while clicking)
-                // turns to face this direction before walking, same as
-                // Shift+key from the keyboard -- see teleopDirection()'s
-                // _turnToFace parameter.
-                onPressed: if (modelData.key !== "S")
-                    HumanControlPanel.teleopDirection(
-                        teleopPad.humanIndex, modelData.key, HumanControlPanel.shiftHeld)
+                // Movement keys turn to face where they're walking by
+                // default now (see teleopDirection()'s _turnToFace),
+                // matching the keyboard's diagonal-key branch: J held
+                // switches back to the old no-turn strafe. S-held-click on
+                // A/D instead spins in place (teleopRotate()), same as
+                // S+A/S+D from the keyboard.
+                onPressed: {
+                    if (modelData.key === "N") return
+                    if (HumanControlPanel.sHeld && (modelData.key === "A" || modelData.key === "D"))
+                        HumanControlPanel.teleopRotate(teleopPad.humanIndex, modelData.key === "A")
+                    else
+                        HumanControlPanel.teleopDirection(teleopPad.humanIndex, modelData.key,
+                            !HumanControlPanel.jHeld)
+                }
                 onReleased: HumanControlPanel.teleopStop(teleopPad.humanIndex)
-                onClicked: if (modelData.key === "S")
+                onClicked: if (modelData.key === "N")
                     HumanControlPanel.teleopStop(teleopPad.humanIndex)
               }
             }
@@ -400,6 +407,68 @@ Rectangle {
       function onActiveViewIndexChanged() {
         viewCombo.currentIndex = HumanControlPanel.activeViewIndex
         viewDistanceField.text = HumanControlPanel.activeViewDistance.toFixed(2)
+      }
+    }
+
+    // ── 移動パラメーター（ジャンプ・速度）─────────────────
+    // ジャンプ高さ・基準移動速度はキー操作対象(activeHumanIndex)にかかる
+    // グローバル設定 -- shiftHeld/ctrlHeld/sHeld/jHeld と同じ扱いで、対象人物を
+    // 切り替えても値は維持される。基準速度はCtrl（ゆっくり歩く）/Shift
+    // （走る）を押していない、通常の移動時の速度。Ctrl/Shiftを押すと
+    // この基準速度に対してさらに倍率がかかる。
+    Rectangle { Layout.fillWidth: true; height: 1; color: "#c7d8d4" }
+    Label { text: "移動パラメーター"; color: "#183b37"; font.bold: true }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 4
+      Label { text: "ジャンプの高さ[m]"; color: "#536b67" }
+      Slider {
+        id: jumpHeightSlider
+        Layout.fillWidth: true
+        from: 0.05
+        to: 1.5
+        Component.onCompleted: value = HumanControlPanel.jumpHeight
+        onMoved: HumanControlPanel.setJumpHeight(value)
+      }
+      Label {
+        text: HumanControlPanel.jumpHeight.toFixed(2)
+        color: "#536b67"
+        Layout.preferredWidth: 34
+      }
+    }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      Label { text: "基準移動速度"; color: "#536b67" }
+      Slider {
+        id: speedMultiplierSlider
+        Layout.fillWidth: true
+        from: 0.1
+        to: 4.0
+        Component.onCompleted: value = HumanControlPanel.speedMultiplier
+        onMoved: HumanControlPanel.setSpeedMultiplier(value)
+      }
+      Label {
+        text: (HumanControlPanel.ctrlHeld ? "遅い" :
+            (HumanControlPanel.shiftHeld ? "走る" : "歩く")) +
+            "（x" + HumanControlPanel.speedMultiplier.toFixed(2) + "）"
+        color: "#536b67"
+        Layout.preferredWidth: 92
+      }
+      Button {
+        text: "⤴ ジャンプ"
+        enabled: HumanControlPanel.activeHumanIndex >= 0 &&
+            HumanControlPanel.isHumanActorAt(HumanControlPanel.activeHumanIndex)
+        onClicked: HumanControlPanel.teleopJump(HumanControlPanel.activeHumanIndex)
+      }
+    }
+    Connections {
+      target: HumanControlPanel
+      function onJumpHeightChanged() {
+        jumpHeightSlider.value = HumanControlPanel.jumpHeight
+      }
+      function onSpeedMultiplierChanged() {
+        speedMultiplierSlider.value = HumanControlPanel.speedMultiplier
       }
     }
 
@@ -501,17 +570,38 @@ Rectangle {
 
     Label {
       Layout.fillWidth: true
-      text: "walking_actor / DoctorFemaleWalk はQWEASDZXCパッドで移動できます" +
-          "（/<名前>/cmd_vel, /<名前>/cmd_path をgz-transportで直接publish）。"
+      text: "walking_actor / DoctorFemaleWalk は移動パッドで操作できます" +
+          "（/<名前>/cmd_vel, /<名前>/cmd_path, /<名前>/cmd_jump をgz-transportで" +
+          "直接publish）。"
       color: "#7b928d"
       font.pixelSize: 11
       wrapMode: Text.Wrap
     }
     Label {
       Layout.fillWidth: true
-      text: "キーボードでも操作可: Q W E / A S D / Z X C（Sで停止）、Shiftを押しながらだと" +
-          "その方向を向いてから歩きます（例：Shift+Xで振り返って後退）。" +
-          "1〜9キーで⌨操作対象を切替。"
+      text: "キーボードでも操作可: Q W E / A D / Z X C の8方向キー、Nで停止。" +
+          "移動すると体もその方向を向きます。Ctrlを押しながら移動でゆっくり歩き、" +
+          "Shiftを押しながら移動で走ります（上のスライダーの基準速度に対して" +
+          "倍率がかかります。移動中に後からCtrl/Shiftを押しても即座に反映され" +
+          "ます）。Jを押しながら移動すると、体を正面に向けたまま横や後ろへ進む" +
+          "従来のストレイフ移動になります。1〜9キーで⌨操作対象を切替。"
+      color: "#7b928d"
+      font.pixelSize: 11
+      wrapMode: Text.Wrap
+    }
+    Label {
+      Layout.fillWidth: true
+      text: "Sを押しながらA/Dでその場回転します（Aで左回り、Dで右回り）。" +
+          "Ctrl/Shiftを押しながらだと回転速度も変わります。"
+      color: "#7b928d"
+      font.pixelSize: 11
+      wrapMode: Text.Wrap
+    }
+    Label {
+      Layout.fillWidth: true
+      text: "Enterキーでその場ジャンプ（移動キーを押しながらだとその方向に進みつつ" +
+          "ジャンプ）。空中でもう一度Enterを押すと二段ジャンプできます。" +
+          "ジャンプの高さは上のスライダーで調整できます。"
       color: "#7b928d"
       font.pixelSize: 11
       wrapMode: Text.Wrap

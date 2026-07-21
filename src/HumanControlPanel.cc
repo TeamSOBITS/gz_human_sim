@@ -19,6 +19,7 @@
 #include <gz/gui/GuiEvents.hh>
 #include <gz/gui/MainWindow.hh>
 #include <gz/msgs/boolean.pb.h>
+#include <gz/msgs/double.pb.h>
 #include <gz/msgs/empty.pb.h>
 #include <gz/msgs/entity.pb.h>
 #include <gz/msgs/pose_v.pb.h>
@@ -104,19 +105,36 @@ static bool IsActorIndex(int _index)
   return _index >= 0 && _index < 2;
 }
 
-// QWEASDZXC 9-key movement layout (Q W E / A S D / Z X C, S = stop), shared
-// by the on-screen pad and the keyboard shortcuts in eventFilter(). Diagonal
-// components are scaled by 1/sqrt(2) so diagonal moves aren't faster than
-// straight ones. X is the odd one out: rather than a pure backward strafe
-// (which would moonwalk the actor away without it ever turning around), it
-// combines backward motion with a turn rate so the actor visibly spins to
-// face the direction it's retreating toward -- but only when _turnToFace
-// is requested (Shift+key); a plain key press is always a pure strafe,
-// including X (straight-back strafe, i.e. moonwalking), same as the other
-// 7 directions.
+// Movement layout (Q W E / A _ D / Z X C, center vacated -- S and N are
+// held modifier / stop keys now, not directions), shared by the on-screen
+// pad and the keyboard shortcuts in eventFilter(). Diagonal components are
+// scaled by 1/sqrt(2) so diagonal moves aren't faster than straight ones.
+// X is the odd one out: rather than a pure backward strafe (which would
+// moonwalk the actor away without it ever turning around), it combines
+// backward motion with a turn rate so the actor visibly spins to face the
+// direction it's retreating toward -- but only when _turnToFace is
+// requested (S held); a plain key press is always a pure strafe, including
+// X (straight-back strafe, i.e. moonwalking), same as the other 7
+// directions.
 static constexpr double kTeleopSpeed = 1.0;
 static constexpr double kTeleopDiagonal = kTeleopSpeed * 0.70710678;
 static constexpr double kTeleopTurnRate = 2.5;
+
+// Jump height (meters) range the QML slider / setJumpHeight() clamp to.
+static constexpr double kJumpHeightMin = 0.05;
+static constexpr double kJumpHeightMax = 1.5;
+
+// Baseline speed-multiplier range setSpeedMultiplier() (the QML slider)
+// clamps to.
+static constexpr double kSpeedMultiplierMin = 0.1;
+static constexpr double kSpeedMultiplierMax = 4.0;
+
+// Extra factor EffectiveSpeedMultiplier() applies on top of the baseline
+// speedMultiplierState while Ctrl (slow walk) or Shift (run) is held --
+// see eventFilter()'s Key_Control/Key_Shift tracking and teleopDirection()/
+// ApplyHeldDirectionKeys(), which are the only two places that call it.
+static constexpr double kSlowFactor = 0.5;
+static constexpr double kRunFactor = 2.0;
 
 // Every entry's (linear, lateral) magnitude is kTeleopSpeed by construction
 // (cardinal directions put it all on one axis; diagonals split it
@@ -139,9 +157,28 @@ static bool DirectionToTwist(
   else if (_direction == "E") { _linear = kTeleopDiagonal; _lateral = -kTeleopDiagonal; }
   else if (_direction == "Z") { _linear = -kTeleopDiagonal; _lateral = kTeleopDiagonal; }
   else if (_direction == "C") { _linear = -kTeleopDiagonal; _lateral = -kTeleopDiagonal; }
-  else if (_direction == "S") { /* stop: all-zero */ }
   else { return false; }
   return true;
+}
+
+// The 4 cardinal keys eligible for steering-combo tracking (see
+// PressDirectionKey()/ApplyHeldDirectionKeys()). Diagonals (Q/E/Z/C) stay
+// on the old single-shot immediate path.
+static bool IsSteerableDirection(const std::string &_direction)
+{
+  return _direction == "W" || _direction == "A" ||
+      _direction == "D" || _direction == "X";
+}
+
+// atan2(lateral, linear) for a direction's DirectionToTwist() vector --
+// same convention teleopDirection()'s turnToFace path already uses for
+// headingOffset, reused here so the turn direction sign logic in
+// ApplyHeldDirectionKeys() matches it exactly.
+static double DirectionHeadingAngle(const std::string &_direction)
+{
+  double linear = 0.0, lateral = 0.0, angular = 0.0;
+  DirectionToTwist(_direction, linear, lateral, angular);
+  return std::atan2(lateral, linear);
 }
 
 // Keyboard shortcuts only fire when focus isn't on a text-editable QML item
@@ -178,6 +215,17 @@ static const char *const kViewpointLabels[kViewCount] = {
 // human-scale (roughly 1.6-1.8m), unlike guide_robot's robots, so this
 // differs from GuiderRobotManager::setViewpoint()'s equivalent value.
 static constexpr double kEyeHeight = 1.6;
+
+// How eagerly the chase camera (SetFollowTarget/SetTrackTarget's pgain)
+// catches up to the human's current world position each frame. The
+// background-swings-when-the-body-turns problem this used to be tuned for
+// is now fixed properly via ViewCommand::worldFrame instead (see the .hh
+// and ApplyViewpoint()) -- the human's own rotation no longer moves the
+// camera at all, so this only smooths the camera's translation as the
+// human actually walks somewhere. Kept a bit below the original 0.35 for
+// a gentle trailing feel without being sluggish to snap onto a
+// freshly-selected human.
+static constexpr double kChasePGain = 0.25;
 
 // dladdr anchor: resolves to the shared library this code was loaded
 // from, so LoadConfig() can find human_pose_presets.yaml under this
@@ -263,26 +311,67 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
   else if (_event->type() == QEvent::KeyPress || _event->type() == QEvent::KeyRelease)
   {
     auto *keyEvent = static_cast<QKeyEvent *>(_event);
-    // Tracked separately from the per-key switch below (not just read off
-    // modifiers() on a QWEASDZXC key) so QML buttons can also read
-    // shiftHeld live for mouse-driven Shift+click, and so it stays correct
-    // even though isAutoRepeat() presses/releases for the QWEASDZXC keys
-    // themselves are filtered out below.
-    if (keyEvent->key() == Qt::Key_Shift && !keyEvent->isAutoRepeat())
+    const bool pressed = _event->type() == QEvent::KeyPress;
+    // Shift/Ctrl/S are tracked as plain held-state (not read off
+    // modifiers()/a per-key switch at the moment a direction key fires) so
+    // QML buttons can also read shiftHeld/ctrlHeld/sHeld/jHeld live for
+    // mouse-driven clicks, and so S -- not a real Qt modifier -- can be
+    // tracked the same way as Shift/Ctrl. Not gated on IsTextEditFocused()
+    // (unlike the direction dispatch below) so these stay accurate even
+    // while a name/x/y/z field has focus elsewhere in the panel.
+    if (keyEvent->key() == Qt::Key_Shift && !keyEvent->isAutoRepeat() &&
+        pressed != this->shiftHeldState)
     {
-      const bool held = _event->type() == QEvent::KeyPress;
-      if (held != this->shiftHeldState)
-      {
-        this->shiftHeldState = held;
-        this->shiftHeldChanged();
-      }
+      this->shiftHeldState = pressed;
+      this->shiftHeldChanged();
+      // Live speed/mode react to Shift toggling mid-hold -- e.g. holding W
+      // and THEN pressing Shift starts running immediately, no need to
+      // release and re-press W. See RefreshHeldMovementSpeed().
+      this->RefreshHeldMovementSpeed();
+    }
+    else if (keyEvent->key() == Qt::Key_Control && !keyEvent->isAutoRepeat() &&
+        pressed != this->ctrlHeldState)
+    {
+      this->ctrlHeldState = pressed;
+      this->ctrlHeldChanged();
+      this->RefreshHeldMovementSpeed();
+    }
+    else if (keyEvent->key() == Qt::Key_S && !keyEvent->isAutoRepeat() &&
+        pressed != this->sHeldState)
+    {
+      this->sHeldState = pressed;
+      this->sHeldChanged();
+    }
+    else if (keyEvent->key() == Qt::Key_J && !keyEvent->isAutoRepeat() &&
+        pressed != this->jHeldState)
+    {
+      this->jHeldState = pressed;
+      this->jHeldChanged();
+      // J is the strafe-mode modifier -- live-switch a currently-held key
+      // between turn-to-face and strafe the same way Shift/Ctrl live-swap
+      // speed above.
+      this->RefreshHeldMovementSpeed();
     }
     if (!keyEvent->isAutoRepeat() && !IsTextEditFocused())
     {
-      if (_event->type() == QEvent::KeyPress &&
-          keyEvent->key() >= Qt::Key_1 && keyEvent->key() <= Qt::Key_9)
+      if (pressed && keyEvent->key() >= Qt::Key_1 && keyEvent->key() <= Qt::Key_9)
       {
         this->setActiveHuman(keyEvent->key() - Qt::Key_1);
+      }
+      else if (pressed &&
+          (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter))
+      {
+        // Jump in place, or -- if a direction key is still held -- while
+        // continuing to move that way (teleopJump() only adds a Z arc, the
+        // held key(s)' horizontal Twist keeps applying unchanged).
+        this->teleopJump(this->activeHumanIndex);
+      }
+      else if (pressed && keyEvent->key() == Qt::Key_N)
+      {
+        // Immediate stop -- this is S's old job; S is now the
+        // turn-to-face modifier (see sHeldState above/teleopDirection()).
+        this->heldDirectionKeys.clear();
+        this->teleopStop(this->activeHumanIndex);
       }
       else
       {
@@ -293,7 +382,6 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
           case Qt::Key_W: direction = "W"; break;
           case Qt::Key_E: direction = "E"; break;
           case Qt::Key_A: direction = "A"; break;
-          case Qt::Key_S: direction = "S"; break;
           case Qt::Key_D: direction = "D"; break;
           case Qt::Key_Z: direction = "Z"; break;
           case Qt::Key_X: direction = "X"; break;
@@ -302,11 +390,46 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
         }
         if (!direction.empty())
         {
-          if (_event->type() == QEvent::KeyPress)
-            this->teleopDirection(this->activeHumanIndex, QString::fromStdString(direction),
-                keyEvent->modifiers().testFlag(Qt::ShiftModifier));
+          if (this->sHeldState && (direction == "A" || direction == "D"))
+          {
+            // S+A / S+D: spin in place (A = counterclockwise, D =
+            // clockwise) instead of walking -- see teleopRotate(). This
+            // is S's whole remaining job now that plain movement below
+            // always turns to face where it's going anyway.
+            this->heldDirectionKeys.clear();
+            if (pressed)
+              this->teleopRotate(this->activeHumanIndex, direction == "A");
+            else
+              this->teleopStop(this->activeHumanIndex);
+          }
+          else if (IsSteerableDirection(direction))
+          {
+            // W/A/D/X go through the held-key tracker: PressDirectionKey()/
+            // ReleaseDirectionKey() decide there whether a solo key turns
+            // to face and walks, or (J strafe mode, or a 2nd key joining
+            // for the curving combo) falls through to the old strafe/curve
+            // Twist via ApplyHeldDirectionKeys().
+            if (pressed)
+              this->PressDirectionKey(direction);
+            else
+              this->ReleaseDirectionKey(direction);
+          }
+          else if (pressed)
+          {
+            // Diagonals (Q/E/Z/C): always single-shot immediate. Turn to
+            // face and walk by default, same as W/A/D/X; J held switches
+            // to the original no-turn strafe (see PressDirectionKey()'s
+            // matching override).
+            this->heldDirectionKeys.clear();
+            const bool turnToFace = !this->jHeldState;
+            this->teleopDirection(
+                this->activeHumanIndex, QString::fromStdString(direction), turnToFace);
+          }
           else
+          {
+            this->heldDirectionKeys.clear();
             this->teleopStop(this->activeHumanIndex);
+          }
         }
       }
     }
@@ -388,6 +511,84 @@ bool HumanControlPanel::ShiftHeld() const
   return this->shiftHeldState;
 }
 
+bool HumanControlPanel::CtrlHeld() const
+{
+  return this->ctrlHeldState;
+}
+
+bool HumanControlPanel::SHeld() const
+{
+  return this->sHeldState;
+}
+
+bool HumanControlPanel::JHeld() const
+{
+  return this->jHeldState;
+}
+
+double HumanControlPanel::JumpHeight() const
+{
+  return this->jumpHeightState;
+}
+
+double HumanControlPanel::SpeedMultiplier() const
+{
+  return this->speedMultiplierState;
+}
+
+void HumanControlPanel::setJumpHeight(double _height)
+{
+  const double clamped = std::clamp(_height, kJumpHeightMin, kJumpHeightMax);
+  if (std::abs(clamped - this->jumpHeightState) < 1e-9)
+    return;
+  this->jumpHeightState = clamped;
+  this->jumpHeightChanged();
+}
+
+void HumanControlPanel::setSpeedMultiplier(double _value)
+{
+  const double clamped = std::clamp(_value, kSpeedMultiplierMin, kSpeedMultiplierMax);
+  if (std::abs(clamped - this->speedMultiplierState) < 1e-9)
+    return;
+  this->speedMultiplierState = clamped;
+  this->speedMultiplierChanged();
+}
+
+double HumanControlPanel::EffectiveSpeedMultiplier() const
+{
+  const double factor = this->ctrlHeldState
+      ? kSlowFactor : (this->shiftHeldState ? kRunFactor : 1.0);
+  return this->speedMultiplierState * factor;
+}
+
+void HumanControlPanel::teleopJump(int _index)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.jumpPublisher.Valid())
+    return;
+
+  gz::msgs::Double message;
+  message.set_data(this->jumpHeightState);
+  human.jumpPublisher.Publish(message);
+}
+
+void HumanControlPanel::teleopRotate(int _index, bool _counterClockwise)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  // Pure-angular Twist -- no linear/lateral -- so the actor spins on the
+  // spot rather than walking. Sign matches DirectionToTwist()'s A/D
+  // convention (A: +lateral -> +yaw -> counterclockwise; D: -lateral ->
+  // -yaw -> clockwise), same as ApplyHeldDirectionKeys()'s steering sign.
+  const double angular =
+      (_counterClockwise ? kTeleopTurnRate : -kTeleopTurnRate) *
+      this->EffectiveSpeedMultiplier();
+  ++this->humans.at(_index).teleopGeneration;
+  this->teleopMove(_index, 0.0, 0.0, angular);
+}
+
 int HumanControlPanel::ActiveViewIndex() const
 {
   if (this->activeHumanIndex < 0 ||
@@ -422,13 +623,13 @@ void HumanControlPanel::setActiveHuman(int _index)
   this->activeHumanChanged();
   this->activeFollowModeChanged();
   // Same auto-focus as a fresh spawn (see PollSpawnConfirmation): jump the
-  // camera to a diagonal-up view of whichever human just became "対象".
+  // camera to a behind/chase view of whichever human just became "対象".
   // This also updates the human's stored viewIndex/viewDistance and fires
   // activeViewIndexChanged() itself (since _index == activeHumanIndex by
   // now), so no separate call to that is needed here.
-  this->setViewpoint(_index, kViewFrontRightUp, 2.0);
+  this->setViewpoint(_index, kViewBehind, 2.0);
   this->SetStatus(QString::fromStdString(this->humans.at(_index).name) +
-      " をキーボード/視点操作対象にしました（斜め上視点に切替）");
+      " をキーボード/視点操作対象にしました（後方追従視点に切替）");
 }
 
 void HumanControlPanel::SetStatus(const QString &_status)
@@ -714,12 +915,15 @@ void HumanControlPanel::PollSpawnConfirmation(
   {
     const std::string velocityTopic = "/" + nameStd + "/cmd_vel";
     const std::string pathTopic = "/" + nameStd + "/cmd_path";
+    const std::string jumpTopic = "/" + nameStd + "/cmd_jump";
     const std::string removeTopic = "/" + nameStd + "/remove_actor";
     const std::string followModeTopic = "/" + nameStd + "/set_follow_mode";
     human.velocityPublisher =
         this->node.Advertise<gz::msgs::Twist>(velocityTopic);
     human.pathPublisher =
         this->node.Advertise<gz::msgs::Pose_V>(pathTopic);
+    human.jumpPublisher =
+        this->node.Advertise<gz::msgs::Double>(jumpTopic);
     human.removePublisher =
         this->node.Advertise<gz::msgs::Empty>(removeTopic);
     human.followModePublisher =
@@ -747,11 +951,10 @@ void HumanControlPanel::PollSpawnConfirmation(
   this->activeHumanChanged();
   this->activeFollowModeChanged();
 
-  // guide_robot(GuiderRobotManager)がspawn直後に自動でview index 7
-  // （右奥上から・全体俯瞰）へカメラを合わせるのと同じ挙動。activeHumanIndex
+  // 人物の初期デフォルト視点は後方追従（kViewBehind）。activeHumanIndex
   // をこの直前に設定しているので、setViewpoint()内のactiveViewIndexChanged()
   // 発火でグローバルの視点コンボにも即反映される。
-  this->setViewpoint(newIndex, kViewFrontRightUp, 2.0);
+  this->setViewpoint(newIndex, kViewBehind, 2.0);
 }
 
 void HumanControlPanel::removeHuman(int _index)
@@ -846,12 +1049,27 @@ void HumanControlPanel::teleopMove(
 
 void HumanControlPanel::teleopStop(int _index)
 {
-  // Bump the generation first so a pending turn-then-walk sequence (see
-  // teleopDirection() below) can't land its second phase after the user
-  // has already let go.
   if (_index >= 0 && _index < static_cast<int>(this->humans.size()))
     ++this->humans.at(_index).teleopGeneration;
   this->teleopMove(_index, 0.0, 0.0, 0.0);
+}
+
+void HumanControlPanel::PublishTurnToFace(int _index, double _speed, double _targetHeadingRad)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.velocityPublisher.Valid())
+    return;
+
+  // angular.x doubles as the turn-to-face flag ActorCommandPlugin::
+  // VelocityCallback() checks -- see the comment there. angular.z here is
+  // an ABSOLUTE world heading (radians), not a turn rate.
+  gz::msgs::Twist message;
+  message.mutable_linear()->set_x(_speed);
+  message.mutable_angular()->set_x(1.0);
+  message.mutable_angular()->set_z(_targetHeadingRad);
+  human.velocityPublisher.Publish(message);
 }
 
 void HumanControlPanel::teleopDirection(
@@ -860,52 +1078,159 @@ void HumanControlPanel::teleopDirection(
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return;
 
+  const std::string direction = _direction.toStdString();
   double linear = 0.0;
   double lateral = 0.0;
   double angular = 0.0;
-  if (!DirectionToTwist(_direction.toStdString(), linear, lateral, angular))
+  if (!DirectionToTwist(direction, linear, lateral, angular))
     return;
+  const double speed = this->EffectiveSpeedMultiplier();
 
-  if (_turnToFace && _direction != "S")
+  if (_turnToFace)
   {
-    // Shift+key: turn in place to face this direction, then walk forward,
-    // rather than a plain strafe. Done as two sequential phases -- holding
-    // a constant linear+angular Twist together would just trace a circle
-    // forever (unicycle-model kinematics), not a turn-then-walk motion.
-    // headingOffset is this direction's angle relative to the actor's
-    // current facing (0 = W/straight ahead, +-pi = X/straight back), read
-    // straight off the same (linear, lateral) the plain-strafe path above
-    // uses; magnitude is kTeleopSpeed for every entry in that table by
-    // construction (see DirectionToTwist()'s comment), so phase 2 always
-    // walks forward at the same speed regardless of which key this was.
-    const double headingOffset = std::atan2(lateral, linear);
-    const double magnitude = std::hypot(linear, lateral);
-    const int generation = ++this->humans.at(_index).teleopGeneration;
-    if (std::abs(headingOffset) < 1e-6)
-    {
-      // W: already facing the right way, no turn phase needed.
-      this->teleopMove(_index, magnitude, 0.0, 0.0);
-      return;
-    }
-    const double turnRate =
-        headingOffset > 0.0 ? kTeleopTurnRate : -kTeleopTurnRate;
-    this->teleopMove(_index, 0.0, 0.0, turnRate);
-    const int turnDurationMs = static_cast<int>(
-        (std::abs(headingOffset) / kTeleopTurnRate) * 1000.0);
-    QTimer::singleShot(turnDurationMs, this,
-        [this, _index, generation, magnitude]()
-        {
-          if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
-            return;
-          if (this->humans.at(_index).teleopGeneration != generation)
-            return;
-          this->teleopMove(_index, magnitude, 0.0, 0.0);
-        });
+    // Steer toward this direction's ABSOLUTE world heading (fixed per-key
+    // angle table -- see DirectionHeadingAngle()) while continuously
+    // walking forward, instead of the old stop-in-place-then-walk two
+    // phases: ActorCommandPlugin::PreUpdate() now does the smooth
+    // in-motion arc itself, every tick, for as long as this Twist keeps
+    // being the latest one received. Because the target is an ABSOLUTE
+    // heading rather than a turn relative to wherever the actor currently
+    // happens to be facing, pressing the same direction key again (or a
+    // live speed change re-publishing this, see RefreshHeldMovementSpeed())
+    // is always idempotent -- it never stacks another 90 degrees on top,
+    // unlike the old relative-angle design. magnitude is kTeleopSpeed for
+    // every entry in DirectionToTwist()'s table by construction (see its
+    // comment), so this is exactly the walking speed regardless of which
+    // key it was.
+    ++this->humans.at(_index).teleopGeneration;
+    this->PublishTurnToFace(
+        _index, kTeleopSpeed * speed, DirectionHeadingAngle(direction));
     return;
   }
 
+  linear *= speed;
+  lateral *= speed;
   ++this->humans.at(_index).teleopGeneration;
   this->teleopMove(_index, linear, lateral, angular);
+}
+
+void HumanControlPanel::PressDirectionKey(const std::string &_direction)
+{
+  auto &keys = this->heldDirectionKeys;
+  if (std::find(keys.begin(), keys.end(), _direction) == keys.end())
+  {
+    // A 3rd simultaneous direction key has no defined combo meaning here;
+    // ignore it rather than guess (the first two keep driving the human).
+    if (keys.size() >= 2)
+      return;
+    keys.push_back(_direction);
+  }
+  // Solo key, not in J strafe-mode: turn the body to face this direction,
+  // then walk -- teleopDirection()'s turnToFace path already handles
+  // "already facing that way" (W) as an instant walk, no visible turn
+  // needed. This bypasses ApplyHeldDirectionKeys()'s pure-strafe Twist
+  // entirely for the solo case; that function is only still used below
+  // for the 2-key curving combo, or here in strafe mode.
+  if (keys.size() == 1 && !this->jHeldState)
+  {
+    this->teleopDirection(
+        this->activeHumanIndex, QString::fromStdString(_direction), true);
+    return;
+  }
+  this->ApplyHeldDirectionKeys();
+}
+
+void HumanControlPanel::ReleaseDirectionKey(const std::string &_direction)
+{
+  auto &keys = this->heldDirectionKeys;
+  keys.erase(std::remove(keys.begin(), keys.end(), _direction), keys.end());
+  if (keys.empty())
+  {
+    this->teleopStop(this->activeHumanIndex);
+  }
+  else if (keys.size() == 1 && !this->jHeldState)
+  {
+    // Back down to a single held key -- same turn-to-face-then-walk
+    // restart as PressDirectionKey()'s solo-key branch (the 2-key combo
+    // we may have just been doing can leave the body facing a heading
+    // that doesn't match this key's own).
+    this->teleopDirection(
+        this->activeHumanIndex, QString::fromStdString(keys.front()), true);
+  }
+  else
+  {
+    this->ApplyHeldDirectionKeys();
+  }
+}
+
+void HumanControlPanel::ApplyHeldDirectionKeys()
+{
+  const auto &keys = this->heldDirectionKeys;
+  if (keys.empty())
+    return;
+
+  const int index = this->activeHumanIndex;
+  if (index < 0 || index >= static_cast<int>(this->humans.size()))
+    return;
+
+  if (keys.size() == 2 && !this->jHeldState)
+  {
+    // Curving combo: steer toward the SECOND (most recently pressed)
+    // key's absolute heading via the same turn-to-face mechanism
+    // teleopDirection() uses for a solo key, instead of publishing a
+    // fixed turn RATE that never got zeroed back out -- that old version
+    // kept rotating for as long as both keys stayed held, so holding e.g.
+    // W then D never settled into moving right, it just spiralled
+    // forever. This version curves in and then walks straight the moment
+    // it reaches the second key's heading, exactly like a solo
+    // turn-to-face key. Releasing either key still falls through to
+    // ReleaseDirectionKey()'s solo-key retarget, unchanged.
+    ++this->humans.at(index).teleopGeneration;
+    this->PublishTurnToFace(index, kTeleopSpeed * this->EffectiveSpeedMultiplier(),
+        DirectionHeadingAngle(keys.back()));
+    return;
+  }
+
+  // J strafe mode (1 or 2 keys -- a 2nd key's direction is ignored here,
+  // strafe mode never turns): the original body-relative Twist, angular
+  // always 0.
+  double linear = 0.0, lateral = 0.0, angular = 0.0;
+  DirectionToTwist(keys.front(), linear, lateral, angular);
+  const double speed = this->EffectiveSpeedMultiplier();
+  linear *= speed;
+  lateral *= speed;
+  ++this->humans.at(index).teleopGeneration;
+  this->teleopMove(index, linear, lateral, angular);
+}
+
+void HumanControlPanel::RefreshHeldMovementSpeed()
+{
+  const int index = this->activeHumanIndex;
+  if (index < 0 || index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &keys = this->heldDirectionKeys;
+  if (keys.empty())
+    return;
+
+  if (keys.size() == 2 || this->jHeldState)
+  {
+    // 2-key curve combo, or solo J strafe -- both are the
+    // ApplyHeldDirectionKeys() Twist, always safe/idempotent to just
+    // recompute and republish, including switching INTO strafe mode
+    // mid-hold (J newly held while a solo key was already in turn-to-face
+    // mode below).
+    this->ApplyHeldDirectionKeys();
+    return;
+  }
+
+  // Solo key, turn-to-face mode: always safe/idempotent to just reissue
+  // at the current speed, whether or not the actor has finished turning
+  // yet -- teleopDirection()'s target is an absolute world heading, not a
+  // turn relative to wherever the actor currently is facing, so this
+  // never adds extra rotation, it just updates the walking speed (and,
+  // if J was just released, switches back into turn-to-face mode from
+  // strafe mode).
+  this->teleopDirection(index, QString::fromStdString(keys.front()), true);
 }
 
 void HumanControlPanel::sendWaypoint(int _index, double _x, double _y)
@@ -1035,11 +1360,14 @@ void HumanControlPanel::setViewpoint(int _index, int _viewIndex, double _distanc
   {
     case kViewFirstPerson:
       // Camera right at the actor's own head, looking out at a point far
-      // ahead in its own frame: turns with the actor like its own eyes.
-      // The distance box doesn't apply to this view (same as
-      // GuiderRobotManager's equivalent).
+      // ahead in its own (local) frame: turns with the actor like its own
+      // eyes -- the one view where that's actually wanted, unlike every
+      // other case below (see ViewCommand::worldFrame). The distance box
+      // doesn't apply to this view (same as GuiderRobotManager's
+      // equivalent).
       command.followOffset = {0.1, 0.0, kEyeHeight};
       command.trackOffset = {3.0, 0.0, kEyeHeight - 0.05};
+      command.worldFrame = false;
       break;
     case kViewBehind:
       command.followOffset = {-distance, 0.0, height};
@@ -1197,12 +1525,13 @@ void HumanControlPanel::ApplyViewpoint()
     return;
   }
 
-  // Offsets are in the human's local frame (worldFrame = false), so every
-  // view turns together with the human.
-  this->userCamera->SetFollowTarget(target, command.followOffset, false);
-  this->userCamera->SetFollowPGain(0.35);
-  this->userCamera->SetTrackTarget(target, command.trackOffset, false);
-  this->userCamera->SetTrackPGain(0.35);
+  // command.worldFrame (see the .hh) is false only for kViewFirstPerson --
+  // every other view keeps its offset fixed in world axes so the human's
+  // own body rotation doesn't drag the camera/background around with it.
+  this->userCamera->SetFollowTarget(target, command.followOffset, command.worldFrame);
+  this->userCamera->SetFollowPGain(kChasePGain);
+  this->userCamera->SetTrackTarget(target, command.trackOffset, command.worldFrame);
+  this->userCamera->SetTrackPGain(kChasePGain);
 
   finish();
   this->SetStatus(command.label);

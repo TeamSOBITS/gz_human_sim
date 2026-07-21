@@ -55,7 +55,30 @@ class HumanControlPanel : public gz::gui::Plugin
   Q_PROPERTY(QStringList humanList READ HumanList NOTIFY humansChanged)
   Q_PROPERTY(QString status READ Status NOTIFY StatusChanged)
   Q_PROPERTY(int activeHumanIndex READ ActiveHumanIndex NOTIFY activeHumanChanged)
+  // Held state of Shift -- now the "run" modifier (see kRunFactor in the
+  // .cc); no longer means turn-to-face (that moved to sHeld/Key_S below).
   Q_PROPERTY(bool shiftHeld READ ShiftHeld NOTIFY shiftHeldChanged)
+  // Held state of Ctrl -- the "slow walk" modifier (kSlowFactor).
+  Q_PROPERTY(bool ctrlHeld READ CtrlHeld NOTIFY ctrlHeldChanged)
+  // Held state of S -- now a pure modifier key (no longer "stop", see
+  // Key_N for that): S+direction turns the actor to face that direction
+  // first, then walks forward, exactly what Shift+direction used to do.
+  Q_PROPERTY(bool sHeld READ SHeld NOTIFY sHeldChanged)
+  // Held state of J -- the "strafe mode" modifier: J+direction reproduces
+  // the original body-relative strafe (no turning, body stays facing
+  // forward) instead of the default turn-to-face-then-walk. See
+  // PressDirectionKey()/the eventFilter() diagonal-key branch.
+  Q_PROPERTY(bool jHeld READ JHeld NOTIFY jHeldChanged)
+  // Jump peak height (meters) used by teleopJump()/the Enter-key shortcut --
+  // a global setting like shiftHeld above, not per-human. Adjustable live
+  // from the QML slider (setJumpHeight()).
+  Q_PROPERTY(double jumpHeight READ JumpHeight NOTIFY jumpHeightChanged)
+  // Baseline multiplier on kTeleopSpeed/kTeleopDiagonal for every teleop
+  // Twist this panel publishes, adjustable from the QML slider
+  // (setSpeedMultiplier()). Ctrl/Shift apply a further kSlowFactor/
+  // kRunFactor on top of this at the moment a direction key is pressed --
+  // see EffectiveSpeedMultiplier() in the .cc.
+  Q_PROPERTY(double speedMultiplier READ SpeedMultiplier NOTIFY speedMultiplierChanged)
   // Current viewpoint state of the active human, i.e. whatever setViewpoint()
   // last set for humans[activeHumanIndex]. Single global viewpoint controls
   // (see the QML) bind to these instead of each spawned human owning its
@@ -82,6 +105,11 @@ class HumanControlPanel : public gz::gui::Plugin
   public: QString Status() const;
   public: int ActiveHumanIndex() const;
   public: bool ShiftHeld() const;
+  public: bool CtrlHeld() const;
+  public: bool SHeld() const;
+  public: bool JHeld() const;
+  public: double JumpHeight() const;
+  public: double SpeedMultiplier() const;
   public: int ActiveViewIndex() const;
   public: double ActiveViewDistance() const;
   public: int ActiveFollowModeIndex() const;
@@ -144,20 +172,57 @@ class HumanControlPanel : public gz::gui::Plugin
       int _index, double _linear, double _lateral, double _angular);
   public: Q_INVOKABLE void teleopStop(int _index);
 
-  /// \brief Move human _index one step of the QWEASDZXC 9-key layout
-  /// (Q/W/E/A/S/D/Z/X/C, matching the on-screen pad and the keyboard
-  /// shortcuts handled in eventFilter()). "S" stops. Plain presses are pure
-  /// body-relative strafes with no turning (X included -- straight-back
-  /// strafe, i.e. moonwalking). _turnToFace (Shift+key on the keyboard)
-  /// instead spins the actor in place to face that direction first, then
-  /// walks forward once turned -- constant linear+angular together would
-  /// just trace a circle (unicycle-model kinematics), not a turn-then-walk
-  /// motion, so this is done as two sequential phases.
+  /// \brief Enter-key / jump-button shortcut: publishes a one-shot jump
+  /// request (current jumpHeight) to _index's cmd_jump topic. Purely a
+  /// Z-axis overlay on the ActorCommandPlugin side -- whatever horizontal
+  /// velocity is already active (held W/A/D/X, teleopDirection(), a path,
+  /// ...) keeps driving X/Y/yaw unchanged, so holding a direction key and
+  /// pressing Enter jumps while still moving that way, same as in a 3D
+  /// game. Works a 2nd time while still airborne (double jump); a 3rd
+  /// press before landing is a no-op -- see
+  /// ActorCommandPlugin::JumpCallback()'s jumpCount guard.
+  public: Q_INVOKABLE void teleopJump(int _index);
+
+  /// \brief S+A / S+D shortcut: publishes a pure-angular Twist (no linear/
+  /// lateral) so the actor spins in place instead of walking --
+  /// _counterClockwise true for S+A (left), false for S+D (right). Scaled
+  /// by EffectiveSpeedMultiplier() same as any other movement, so Ctrl/
+  /// Shift still slow down/speed up the spin. Release (KeyRelease/
+  /// onReleased) should call teleopStop(), same as any other held key.
+  public: Q_INVOKABLE void teleopRotate(int _index, bool _counterClockwise);
+
+  /// \brief Manual, continuous jump-height set from the QML slider (meters,
+  /// clamped).
+  public: Q_INVOKABLE void setJumpHeight(double _height);
+
+  /// \brief Manual, continuous baseline speed-multiplier set from the QML
+  /// slider. Ctrl/Shift scale on top of whatever this is set to -- see
+  /// EffectiveSpeedMultiplier() in the .cc.
+  public: Q_INVOKABLE void setSpeedMultiplier(double _value);
+
+  /// \brief Move human _index one step of the movement layout (Q W E / A D
+  /// / Z X C around a vacated center -- matching the on-screen pad and the
+  /// keyboard shortcuts handled in eventFilter()). _turnToFace (the
+  /// default for ordinary movement now -- see PressDirectionKey()) sends
+  /// PublishTurnToFace()'s absolute-heading Twist, which
+  /// ActorCommandPlugin::PreUpdate() uses to smoothly steer the actor's
+  /// yaw toward that direction's fixed world heading while it keeps
+  /// walking forward the whole time -- a natural in-motion arc, not a
+  /// stop-in-place-then-walk, and since the target is an absolute world
+  /// angle (not relative to wherever the actor currently happens to be
+  /// facing), repeating the same direction key is always idempotent.
+  /// Passing false instead reproduces the original body-relative strafe
+  /// with no turning (X included -- straight-back strafe, i.e.
+  /// moonwalking), via the ordinary teleopMove() Twist; that's now only
+  /// reachable via the J "strafe mode" modifier (see PressDirectionKey()/
+  /// the eventFilter() diagonal-key branch). Either way, speed is
+  /// EffectiveSpeedMultiplier() (Ctrl slows, Shift speeds up). Stopping is
+  /// teleopStop(), not a "direction" here -- see Key_N in eventFilter().
   public: Q_INVOKABLE void teleopDirection(
       int _index, const QString &_direction, bool _turnToFace = false);
 
   /// \brief Which spawned human (index into humanList) the keyboard
-  /// shortcuts (QWEASDZXC to move, 1-9 to switch target) currently drive.
+  /// shortcuts (movement keys, 1-9 to switch target) currently drive.
   /// Sits alongside, not instead of, the per-row GUI pad, which always
   /// targets its own row regardless of this selection.
   public: Q_INVOKABLE void setActiveHuman(int _index);
@@ -209,6 +274,9 @@ class HumanControlPanel : public gz::gui::Plugin
     // ECM directly. Only valid for actor-backed humans, same as the two
     // publishers above.
     gz::transport::Node::Publisher removePublisher;
+    // Jump requests (see teleopJump()) -- only advertised for actor-backed
+    // humans, same as velocityPublisher/pathPublisher above.
+    gz::transport::Node::Publisher jumpPublisher;
     // Runtime follow_mode changes (setFollowMode()) -- separate from the
     // spawn-time follow_mode:= launch argument, which only sets the
     // initial SDF value. followModeIndex mirrors viewIndex below: index
@@ -241,6 +309,17 @@ class HumanControlPanel : public gz::gui::Plugin
     std::string target;
     gz::math::Vector3d followOffset{0.0, 0.0, 0.0};
     gz::math::Vector3d trackOffset{0.0, 0.0, 0.6};
+    // True (the default, set for every view except kViewFirstPerson) means
+    // followOffset/trackOffset are fixed WORLD-frame vectors, so the
+    // camera's position/look-at direction don't rotate when the human's
+    // body turns -- only the human's own position (which the offsets are
+    // still added to every frame) moves the camera, keeping the
+    // background visually stable while the body turns in place (a chase
+    // view that rotated with the body would swing the whole background
+    // around on every turn, which reads as disorienting rather than as a
+    // 3D-game-style chase camera). kViewFirstPerson sets this false
+    // instead, since a head/eye view SHOULD turn with the body.
+    bool worldFrame{true};
     QString label;
     int retries{0};
     // Only meaningful together with engage=false: also snap the camera
@@ -287,6 +366,68 @@ class HumanControlPanel : public gz::gui::Plugin
   /// user camera (retrying while the target model is still spawning).
   private: void ApplyViewpoint();
 
+  /// \brief Key-down handler for W/A/D/X: adds _direction to
+  /// heldDirectionKeys (capped at 2 -- a 3rd simultaneous press is
+  /// ignored). Exactly 1 key held routes through teleopDirection(...,
+  /// true) (turn to face, then walk) unless J is held (the "strafe mode"
+  /// modifier), in which case it falls through to ApplyHeldDirectionKeys()
+  /// for the original no-turn strafe. 2 keys held always goes through
+  /// ApplyHeldDirectionKeys() for the curving combo, strafe-mode or not.
+  private: void PressDirectionKey(const std::string &_direction);
+
+  /// \brief Key-up handler for W/A/D/X: drops _direction from
+  /// heldDirectionKeys. Empty -> teleopStop(). Back down to exactly 1 key
+  /// -> same turn-to-face-then-walk restart as PressDirectionKey()'s
+  /// solo-key branch (unless J strafe mode, same override). Otherwise
+  /// (still 2, i.e. this doesn't currently happen) falls through to
+  /// ApplyHeldDirectionKeys().
+  private: void ReleaseDirectionKey(const std::string &_direction);
+
+  /// \brief Publishes the Twist for the current heldDirectionKeys onto
+  /// the active human. 2 keys (and J not held) is the curving combo:
+  /// PublishTurnToFace() toward the SECOND (most recently pressed) key's
+  /// absolute heading, same mechanism a solo turn-to-face key uses, so
+  /// the body curves in and then walks straight once it reaches that
+  /// heading rather than turning forever. Everything else (1 key, or J
+  /// strafe mode with either 1 or 2 keys) is a plain body-relative Twist
+  /// with angular always 0 -- only reached from PressDirectionKey()/
+  /// ReleaseDirectionKey() in J strafe mode, since the normal solo-key
+  /// case now goes through teleopDirection() instead (see those two for
+  /// why).
+  private: void ApplyHeldDirectionKeys();
+
+  /// \brief Publishes an absolute-heading turn-to-face Twist (angular.x
+  /// flag set, angular.z = _targetHeadingRad) directly, bypassing
+  /// teleopMove()'s plain-Twist shape -- see ActorCommandPlugin::
+  /// VelocityCallback() for how the two shapes are told apart, and
+  /// teleopDirection() for the only caller.
+  private: void PublishTurnToFace(int _index, double _speed, double _targetHeadingRad);
+
+  /// \brief Re-evaluates and republishes whatever heldDirectionKeys is
+  /// currently doing, using the just-changed Ctrl/Shift/J state -- called
+  /// right after shiftHeldState/ctrlHeldState/jHeldState update in
+  /// eventFilter() so e.g. holding W and THEN pressing Shift starts
+  /// running immediately, releasing Shift goes back to walking, all
+  /// without needing to let go of W. Safe to just re-call
+  /// ApplyHeldDirectionKeys() (2-key combo or solo J-strafe) or
+  /// teleopDirection(..., true) (solo turn-to-face) unconditionally in
+  /// either case now -- both are idempotent regardless of current state,
+  /// since turn-to-face targets an absolute heading rather than turning
+  /// relative to wherever the actor currently happens to be facing (see
+  /// teleopDirection()). Diagonal (Q/E/Z/C) keys aren't tracked in
+  /// heldDirectionKeys, so this intentionally doesn't cover them -- they
+  /// still pick up a new Ctrl/Shift/J state on their next press.
+  private: void RefreshHeldMovementSpeed();
+
+  /// \brief this->speedMultiplierState (the QML slider's baseline) scaled
+  /// by kSlowFactor if Ctrl is held, kRunFactor if Shift is held, or 1.0 if
+  /// neither -- Ctrl and Shift aren't meant to combine, so Ctrl wins if
+  /// somehow both are down. Read fresh every time a Twist is (re)published
+  /// (teleopDirection(), ApplyHeldDirectionKeys(), teleopRotate(), and
+  /// RefreshHeldMovementSpeed() when a held key's speed needs to react to
+  /// a live Ctrl/Shift change).
+  private: double EffectiveSpeedMultiplier() const;
+
   private: gz::transport::Node node;
   private: std::vector<Human> humans;
   private: std::string worldName;
@@ -294,6 +435,15 @@ class HumanControlPanel : public gz::gui::Plugin
   private: QStringList posePresetList;
   private: int activeHumanIndex{-1};
   private: bool shiftHeldState{false};
+  private: bool ctrlHeldState{false};
+  private: bool sHeldState{false};
+  private: bool jHeldState{false};
+  private: double jumpHeightState{1.0};
+  private: double speedMultiplierState{1.0};
+
+  /// \brief W/A/D/X keys currently held (S not held), in press order,
+  /// capped at 2 entries -- see PressDirectionKey()/ApplyHeldDirectionKeys().
+  private: std::vector<std::string> heldDirectionKeys;
 
   private: gz::rendering::CameraPtr userCamera;
   private: std::mutex viewMutex;
@@ -311,6 +461,11 @@ class HumanControlPanel : public gz::gui::Plugin
   signals: void activeViewIndexChanged();
   signals: void activeFollowModeChanged();
   signals: void shiftHeldChanged();
+  signals: void ctrlHeldChanged();
+  signals: void sHeldChanged();
+  signals: void jHeldChanged();
+  signals: void jumpHeightChanged();
+  signals: void speedMultiplierChanged();
 };
 }  // namespace gz_human_sim
 #endif

@@ -21,8 +21,8 @@ ACTOR_MODEL_NAMES = ('walking_actor', 'DoctorFemaleWalk')
 
 
 def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
-                         remove_topic, follow_mode_topic, follow_mode='auto',
-                         animation_name='walk', animation_factor=4.0,
+                         remove_topic, follow_mode_topic, jump_topic='/cmd_jump',
+                         follow_mode='auto', animation_name='walk', animation_factor=4.0,
                          linear_velocity=1.0, linear_tolerance=0.1):
     """Return a path to a <model_name> model.sdf ready for runtime spawn.
 
@@ -71,6 +71,8 @@ def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
             '<follow_mode_topic>/set_follow_mode</follow_mode_topic>',
             f'<follow_mode_topic>{follow_mode_topic}</follow_mode_topic>', 1)
         resolved_text = resolved_text.replace(
+            '<jump_topic>/cmd_jump</jump_topic>', f'<jump_topic>{jump_topic}</jump_topic>', 1)
+        resolved_text = resolved_text.replace(
             '<follow_mode>auto</follow_mode>', f'<follow_mode>{follow_mode}</follow_mode>', 1)
     else:
         plugin_block = (
@@ -80,6 +82,7 @@ def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
             f'<path_topic>{path_topic}</path_topic>'
             f'<remove_topic>{remove_topic}</remove_topic>'
             f'<follow_mode_topic>{follow_mode_topic}</follow_mode_topic>'
+            f'<jump_topic>{jump_topic}</jump_topic>'
             f'<follow_mode>{follow_mode}</follow_mode>'
             f'<animation_name>{animation_name}</animation_name>'
             f'<animation_factor>{animation_factor}</animation_factor>'
