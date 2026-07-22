@@ -6,6 +6,7 @@
 #include <csignal>
 #include <dlfcn.h>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <regex>
 #include <sstream>
@@ -17,6 +18,7 @@
 #include <QPointer>
 #include <QTimer>
 
+#include <gz/common/Console.hh>
 #include <gz/gui/Application.hh>
 #include <gz/gui/GuiEvents.hh>
 #include <gz/gui/MainWindow.hh>
@@ -34,6 +36,7 @@
 #include <gz/rendering/Camera.hh>
 #include <gz/rendering/RenderingIface.hh>
 #include <gz/rendering/Scene.hh>
+#include <gz/rendering/Visual.hh>
 
 namespace gz_human_sim
 {
@@ -111,6 +114,14 @@ static constexpr double kSpawnProbeSpeed = 1.0;
 static constexpr int kSpawnSafetySettleMs = 2200;
 static constexpr double kSpawnSafetyDisplacementMeters = 0.3;
 
+// PollProbeRemoval(): how often to re-check whether a just-removed probe
+// is actually gone (QueryEntityExists()), and how many times to check
+// before giving up and spawning the real collision-body companion anyway.
+// 150ms * 20 = 3s, comfortably more than removal should ever realistically
+// take -- this is a safety net for a stuck removal, not the expected path.
+static constexpr int kProbeRemovalPollIntervalMs = 150;
+static constexpr int kProbeRemovalMaxAttempts = 20;
+
 // Entity-existence polling: gz-sim's create/remove services ack the
 // request, not the outcome, so spawn/removal are confirmed by polling
 // /world/<w>/state instead of trusting the ack. 20 * 500ms = 10s.
@@ -118,10 +129,34 @@ static constexpr int kEntityPollIntervalMs = 500;
 static constexpr int kEntityPollMaxAttempts = 20;
 static constexpr unsigned int kStateQueryTimeoutMs = 800u;
 
+// ApplyCollisionVisibility(): transparency values (0 = opaque, 1 = fully
+// transparent, see gz::rendering::Material::SetTransparency()) for the
+// collision-body debug capsule's two states. Hidden isn't 1.0 outright --
+// slightly short of fully invisible reads as more intentional ("this is
+// dimmed") than a value that could be mistaken for the visual having
+// failed to apply at all.
+static constexpr float kCollisionHiddenTransparency = 0.9f;
+static constexpr float kCollisionVisibleTransparency = 0.25f;
+// Same idea as kSpawnSafetyMaxAttempts's 8-attempt cap, but per-frame
+// instead of per-spawn-attempt: gives up searching the render scene for a
+// human's collision-body visual after this many failed Render-event
+// ticks (the companion model may take a few frames to actually appear
+// after being spawned/respawned).
+static constexpr int kCollisionVisualMaxRetries = 600;
+
 static bool IsActorIndex(int _index)
 {
   // walking_actor, DoctorFemaleWalk -- keep in sync with kHumanModels above.
   return _index >= 0 && _index < 2;
+}
+
+// Only walking_actor ships sit_down/sitting/stand_up meshes (see
+// models/walking_actor/meshes/) -- DoctorFemaleWalk has a single walk-only
+// mesh, so the sit feature (K key / Space lock / QML toggle) is narrower
+// than IsActorIndex() above.
+static bool IsSitCapableIndex(int _index)
+{
+  return _index == 0;
 }
 
 // Movement layout (Q W E / A _ D / Z X C, center vacated -- S and N are
@@ -339,6 +374,7 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
   if (_event->type() == gz::gui::events::Render::kType)
   {
     this->ApplyViewpoint();
+    this->ApplyCollisionVisibility();
   }
   else if (_event->type() == QEvent::KeyPress || _event->type() == QEvent::KeyRelease)
   {
@@ -384,9 +420,28 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
       // speed above.
       this->RefreshHeldMovementSpeed();
     }
+    else if (keyEvent->key() == Qt::Key_K && !keyEvent->isAutoRepeat() &&
+        pressed != this->kHeldState)
+    {
+      // Hold-to-sit: K down publishes "sit", K up publishes "stand" again
+      // (unless the active human's sit is currently locked, see Key_Space
+      // below/UpdateSitIntent()). Tracked as plain held-state, same as
+      // Shift/Ctrl/S/J above, so a QML button could read kHeld too.
+      this->kHeldState = pressed;
+      this->kHeldChanged();
+      this->UpdateSitIntent(this->activeHumanIndex);
+    }
     if (!keyEvent->isAutoRepeat() && !IsTextEditFocused())
     {
-      if (pressed && keyEvent->key() >= Qt::Key_1 && keyEvent->key() <= Qt::Key_9)
+      if (pressed && keyEvent->key() == Qt::Key_Space)
+      {
+        // Space toggles the active human's sit lock -- on its own (K never
+        // held) this is enough to sit the human down and keep them seated,
+        // since UpdateSitIntent() publishes "locked OR K held". Pressing it
+        // again releases the lock, same Q_INVOKABLE the QML sit button uses.
+        this->toggleSitLock(this->activeHumanIndex);
+      }
+      else if (pressed && keyEvent->key() >= Qt::Key_1 && keyEvent->key() <= Qt::Key_9)
       {
         this->setActiveHuman(keyEvent->key() - Qt::Key_1);
       }
@@ -519,6 +574,21 @@ void HumanControlPanel::OnPoseInfo(const gz::msgs::Pose_V &_message)
         2.0 * (q.w() * q.z() + q.x() * q.y()),
         1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z()));
     cached.valid = true;
+
+    // See activeProbes' own comment: stop a spawn-safety probe as soon as
+    // it reaches its candidate point instead of letting it keep walking
+    // past it until CheckProbeSettle()'s timer deletes it.
+    const auto probeIt = this->activeProbes.find(pose.name());
+    if (probeIt != this->activeProbes.end() && !probeIt->second.stopped)
+    {
+      const double travelled = std::hypot(
+          cached.x - probeIt->second.startX, cached.y - probeIt->second.startY);
+      if (travelled >= kSpawnGridSpacing && probeIt->second.publisher)
+      {
+        probeIt->second.publisher->Publish(gz::msgs::Twist());
+        probeIt->second.stopped = true;
+      }
+    }
   }
 }
 
@@ -584,6 +654,19 @@ bool HumanControlPanel::SHeld() const
 bool HumanControlPanel::JHeld() const
 {
   return this->jHeldState;
+}
+
+bool HumanControlPanel::KHeld() const
+{
+  return this->kHeldState;
+}
+
+bool HumanControlPanel::ActiveSitLocked() const
+{
+  if (this->activeHumanIndex < 0 ||
+      this->activeHumanIndex >= static_cast<int>(this->humans.size()))
+    return false;
+  return this->humans.at(this->activeHumanIndex).sitLocked;
 }
 
 double HumanControlPanel::JumpHeight() const
@@ -740,6 +823,18 @@ bool HumanControlPanel::isActorModel(int _modelIndex) const
   return IsActorIndex(_modelIndex);
 }
 
+bool HumanControlPanel::isSitCapableModel(int _modelIndex) const
+{
+  return IsSitCapableIndex(_modelIndex);
+}
+
+bool HumanControlPanel::isSitCapableHumanAt(int _index) const
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return false;
+  return this->humans.at(_index).sitPublisher.Valid();
+}
+
 QString HumanControlPanel::followModeValue(int _followModeIndex) const
 {
   if (_followModeIndex < 0 || _followModeIndex >= kFollowModeCount)
@@ -768,11 +863,187 @@ void HumanControlPanel::setFollowMode(int _index, int _followModeIndex)
       this->FollowModeLabels().value(_followModeIndex) + "」に変更しました");
 }
 
+void HumanControlPanel::toggleSitLock(int _index)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.sitPublisher.Valid())
+    return;
+
+  human.sitLocked = !human.sitLocked;
+  if (_index == this->activeHumanIndex)
+    this->activeSitLockedChanged();
+  this->SetStatus(QString::fromStdString(human.name) +
+      (human.sitLocked ? " の着席を固定しました" : " の着席固定を解除しました"));
+  this->UpdateSitIntent(_index);
+}
+
+void HumanControlPanel::UpdateSitIntent(int _index)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.sitPublisher.Valid())
+    return;
+
+  // Effective intent: locked (Space) OR K currently held. Locking alone
+  // (K never pressed, e.g. from the QML button) is enough to sit; K alone
+  // (no lock) sits only while held; both together behave the same as K
+  // alone until the lock is released, at which point it falls back to
+  // whatever K is doing right then -- see the Q_PROPERTY comments in the
+  // header for the full K+Space design.
+  const bool wantsSit = human.sitLocked ||
+      (_index == this->activeHumanIndex && this->kHeldState);
+  gz::msgs::StringMsg message;
+  message.set_data(wantsSit ? "sit" : "stand");
+  human.sitPublisher.Publish(message);
+}
+
 bool HumanControlPanel::isHumanActorAt(int _index) const
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return false;
   return this->humans.at(_index).velocityPublisher.Valid();
+}
+
+bool HumanControlPanel::showCollisionAt(int _index) const
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return false;
+  return this->humans.at(_index).showCollision;
+}
+
+void HumanControlPanel::setShowCollision(int _index, bool _value)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.velocityPublisher.Valid())
+    return;
+  human.showCollision = _value;
+  // ApplyCollisionVisibility() (render thread, driven off Render events)
+  // picks this up and applies it next frame -- see its own comment for
+  // why this can't just be done synchronously here. humansChanged() lets
+  // every row's QML checkbox (not just this one, e.g. after
+  // setShowCollisionAll()) resync its displayed checked state.
+  this->humansChanged();
+}
+
+void HumanControlPanel::setShowCollisionAll(bool _value)
+{
+  for (auto &human : this->humans)
+  {
+    if (human.velocityPublisher.Valid())
+      human.showCollision = _value;
+  }
+  this->humansChanged();
+}
+
+double HumanControlPanel::collisionRadiusAt(int _index) const
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return 0.25;
+  return this->humans.at(_index).collisionRadius;
+}
+
+double HumanControlPanel::collisionLengthAt(int _index) const
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return 1.2;
+  return this->humans.at(_index).collisionLength;
+}
+
+void HumanControlPanel::applyCollisionSize(int _index, double _radius, double _length)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.velocityPublisher.Valid())
+    return;  // Static (non-actor) humans have no collision-body companion.
+  if (this->worldName.empty() || this->collisionBodyTemplate.empty())
+    return;
+
+  // Same naming convention spawn_human.launch.py's _spawn_human_cmd()
+  // uses (collision_model_name = f'{model_name}_collision', topic =
+  // f'/model/{collision_model_name}/cmd_vel') -- derived here rather than
+  // stored on Human, since it's fully determined by the human's own name.
+  const std::string collisionModelName = human.name + "_collision";
+  const std::string collisionCmdVelTopic = "/model/" + collisionModelName + "/cmd_vel";
+
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
+  {
+    std::lock_guard<std::mutex> lock(this->poseMutex);
+    const auto it = this->poses.find(collisionModelName);
+    if (it != this->poses.end() && it->second.valid)
+    {
+      x = it->second.x;
+      y = it->second.y;
+      z = it->second.z;
+    }
+  }
+
+  // Same template ProbeSafeSpawnPosition() reuses for its throwaway
+  // probes, but with the real per-human name/topic substituted (not a
+  // probe placeholder) plus the new capsule dimensions.
+  std::string sdf = this->collisionBodyTemplate;
+  const std::string namePlaceholder = "<model name=\"human_collision_body\">";
+  const auto namePos = sdf.find(namePlaceholder);
+  if (namePos != std::string::npos)
+  {
+    sdf.replace(namePos, namePlaceholder.size(),
+        "<model name=\"" + collisionModelName + "\">");
+  }
+  const std::string topicPlaceholder =
+      "<topic>/model/human_collision_body/cmd_vel</topic>";
+  const auto topicPos = sdf.find(topicPlaceholder);
+  if (topicPos != std::string::npos)
+  {
+    sdf.replace(topicPos, topicPlaceholder.size(),
+        "<topic>" + collisionCmdVelTopic + "</topic>");
+  }
+  // <radius>/<length> each appear twice in the template (the <collision>
+  // and its matching debug <visual>, see human_collision_body/model.sdf)
+  // -- replace every occurrence, same pragmatic literal-value
+  // substitution scripts/human_model_utils.py already relies on for topics.
+  const std::string radiusStr = std::to_string(_radius);
+  const std::string radiusPlaceholder = "<radius>0.25</radius>";
+  const std::string newRadius = "<radius>" + radiusStr + "</radius>";
+  for (auto pos = sdf.find(radiusPlaceholder); pos != std::string::npos;
+      pos = sdf.find(radiusPlaceholder, pos + newRadius.size()))
+    sdf.replace(pos, radiusPlaceholder.size(), newRadius);
+  const std::string lengthStr = std::to_string(_length);
+  const std::string lengthPlaceholder = "<length>1.2</length>";
+  const std::string newLength = "<length>" + lengthStr + "</length>";
+  for (auto pos = sdf.find(lengthPlaceholder); pos != std::string::npos;
+      pos = sdf.find(lengthPlaceholder, pos + newLength.size()))
+    sdf.replace(pos, lengthPlaceholder.size(), newLength);
+
+  this->RequestEntityRemoval(collisionModelName);
+  // The old cached material belongs to the entity that's about to be
+  // destroyed -- ApplyCollisionVisibility() re-finds and re-clones a
+  // fresh one for the new entity once it appears.
+  human.collisionMaterial.reset();
+  human.appliedCollisionTransparency = -1.0f;
+  human.collisionVisualRetries = 0;
+  human.collisionRadius = _radius;
+  human.collisionLength = _length;
+
+  // A create request for this name landing before the remove request has
+  // actually been processed server-side would collide with the entity
+  // still being torn down -- give it a moment, same "async operations
+  // need explicit settling time" approach kSpawnSafetySettleMs already
+  // uses elsewhere in this file.
+  QTimer::singleShot(500, this,
+      [this, sdf, collisionModelName, x, y, z]()
+      {
+        this->RequestEntityCreation(sdf, collisionModelName, x, y, z);
+      });
+  this->SetStatus(QString::fromStdString(human.name) +
+      " の当たり判定サイズを変更しました（半径" + QString::number(_radius, 'f', 2) +
+      "m・長さ" + QString::number(_length, 'f', 2) + "m）");
 }
 
 QProcess *HumanControlPanel::StartLaunchProcess(const QStringList &_arguments)
@@ -828,6 +1099,27 @@ void HumanControlPanel::RequestEntityRemoval(const std::string &_name)
   request.set_type(gz::msgs::Entity::MODEL);
 
   const std::string service = "/world/" + this->worldName + "/remove";
+  std::function<void(const gz::msgs::Boolean &, const bool)> callback =
+      [](const gz::msgs::Boolean &, const bool) { /* fire and forget */ };
+  this->node.Request(service, request, callback);
+}
+
+void HumanControlPanel::RequestEntityCreation(const std::string &_sdf,
+    const std::string &_name, double _x, double _y, double _z)
+{
+  gz::msgs::EntityFactory request;
+  request.set_sdf(_sdf);
+  request.set_name(_name);
+  request.mutable_pose()->mutable_position()->set_x(_x);
+  request.mutable_pose()->mutable_position()->set_y(_y);
+  request.mutable_pose()->mutable_position()->set_z(_z);
+
+  const std::string service = "/world/" + this->worldName + "/create";
+  // Fire and forget, same as RequestEntityRemoval() above -- if this
+  // fails, ActorCommandPlugin simply keeps not finding a collision entity
+  // by name (same as before the human_collision_body companion first
+  // spawns) rather than anything crashing, so there's nothing useful to
+  // do with a failure callback here.
   std::function<void(const gz::msgs::Boolean &, const bool)> callback =
       [](const gz::msgs::Boolean &, const bool) { /* fire and forget */ };
   this->node.Request(service, request, callback);
@@ -955,6 +1247,40 @@ void HumanControlPanel::StartRealSpawn(
       });
 }
 
+std::pair<double, double> HumanControlPanel::SpawnSpiralOffset(int _attempt) const
+{
+  // Built once: every integer grid cell in a radius-4 block (9x9 = 81
+  // cells, comfortably more than kSpawnSafetyMaxAttempts even if that cap
+  // grows later), sorted by ascending Euclidean distance from (0, 0) so
+  // index 0 is (0, 0) itself and each following index is the next-nearest
+  // cell -- ties (e.g. the 4 axis neighbours all at distance 1) broken by
+  // angle so same-ring cells still come out in a clean spiral order
+  // rather than an arbitrary one.
+  static const std::vector<std::pair<int, int>> kOffsets = []()
+  {
+    constexpr int kRadius = 4;
+    std::vector<std::pair<int, int>> offsets;
+    for (int i = -kRadius; i <= kRadius; ++i)
+    {
+      for (int j = -kRadius; j <= kRadius; ++j)
+        offsets.emplace_back(i, j);
+    }
+    std::sort(offsets.begin(), offsets.end(),
+        [](const std::pair<int, int> &_a, const std::pair<int, int> &_b)
+        {
+          const double distA = std::hypot(_a.first, _a.second);
+          const double distB = std::hypot(_b.first, _b.second);
+          if (distA != distB)
+            return distA < distB;
+          return std::atan2(_a.second, _a.first) < std::atan2(_b.second, _b.first);
+        });
+    return offsets;
+  }();
+  const auto &offset = kOffsets[std::min<std::size_t>(
+      static_cast<std::size_t>(std::max(_attempt, 0)), kOffsets.size() - 1)];
+  return {offset.first * kSpawnGridSpacing, offset.second * kSpawnGridSpacing};
+}
+
 void HumanControlPanel::ProbeSafeSpawnPosition(
     int _modelIndex, QString _name, QString _posePreset, QString _followMode,
     double _x, double _y, double _z, double _yaw, int _attempt)
@@ -974,12 +1300,13 @@ void HumanControlPanel::ProbeSafeSpawnPosition(
     return;
   }
 
-  // Same grid ProbeSafeSpawnPosition()'s caller (nextSpawnX()/Y()) used to
-  // pick _x/_y in the first place, just walked outward from THIS attempt's
-  // starting point instead of from (0, 0) -- attempt 0 always tests the
-  // original position first.
-  const double candidateX = _x + (_attempt % kSpawnGridColumns) * kSpawnGridSpacing;
-  const double candidateY = _y + (_attempt / kSpawnGridColumns) * kSpawnGridSpacing;
+  // Nearest-first spiral around the user-requested (_x, _y) -- attempt 0
+  // always tests the original position first, then the closest untried
+  // cell in any direction. See SpawnSpiralOffset()'s own comment for why
+  // this replaced the old one-quadrant row-major grid.
+  const auto [offsetX, offsetY] = this->SpawnSpiralOffset(_attempt);
+  const double candidateX = _x + offsetX;
+  const double candidateY = _y + offsetY;
 
   const std::string probeName = "__spawn_probe_" + _name.toStdString() +
       "_" + std::to_string(_attempt);
@@ -1010,19 +1337,38 @@ void HumanControlPanel::ProbeSafeSpawnPosition(
   // pushed back out by gz-sim's own contact resolution -- a symmetric,
   // velocity-free interpenetration with a static body just sits there
   // indefinitely instead of separating. So instead, this spawns the probe
-  // one grid cell short of the candidate (south of it, along -Y, a
-  // direction guaranteed clear of the SAME obstacle unless that obstacle
-  // happens to be at least kSpawnGridSpacing wide there too) and drives
-  // it toward the candidate at a normal walking speed -- exactly the
-  // already-verified "a moving body cleanly stops at a wall's surface"
-  // behavior real teleop movement relies on (see actor_command_plugin.cpp).
+  // one grid cell short of the candidate and drives it toward the
+  // candidate at a normal walking speed -- exactly the already-verified
+  // "a moving body cleanly stops at a wall's surface" behavior real
+  // teleop movement relies on (see actor_command_plugin.cpp).
   // CheckProbeSettle() then checks how far it actually got.
-  const double approachStartY = candidateY - kSpawnGridSpacing;
+  //
+  // Approach direction: radially outward from the original requested
+  // (_x, _y), i.e. straight along this candidate's own spiral offset --
+  // NOT a fixed south->north walk-in like before the spiral search
+  // existed. A fixed direction only made sense back when every candidate
+  // sat in the same +X/+Y quadrant from the request point; the spiral
+  // now puts candidates in every direction, so the approach itself must
+  // rotate with it, or a southward approach would cut across untested
+  // (or already-rejected) territory instead of the same straight line the
+  // candidate was reached by. attempt 0 (offset (0, 0), the exact
+  // requested point) has no direction to derive from, so it keeps the
+  // original fixed south->north approach.
+  double approachDirX = 0.0;
+  double approachDirY = 1.0;
+  const double offsetLength = std::hypot(offsetX, offsetY);
+  if (offsetLength > 1e-6)
+  {
+    approachDirX = offsetX / offsetLength;
+    approachDirY = offsetY / offsetLength;
+  }
+  const double approachStartX = candidateX - approachDirX * kSpawnGridSpacing;
+  const double approachStartY = candidateY - approachDirY * kSpawnGridSpacing;
 
   gz::msgs::EntityFactory request;
   request.set_sdf(probeSdf);
   request.set_name(probeName);
-  request.mutable_pose()->mutable_position()->set_x(candidateX);
+  request.mutable_pose()->mutable_position()->set_x(approachStartX);
   request.mutable_pose()->mutable_position()->set_y(approachStartY);
   request.mutable_pose()->mutable_position()->set_z(0.0);
 
@@ -1048,40 +1394,55 @@ void HumanControlPanel::ProbeSafeSpawnPosition(
   // velocity it received, same as real teleop relies on.
   auto probePublisher = std::make_shared<gz::transport::Node::Publisher>(
       this->node.Advertise<gz::msgs::Twist>(probeTopic));
+  // Registered before the first Publish() below so OnPoseInfo() (transport
+  // thread) can stop this probe the moment it has walked the full approach
+  // distance, instead of leaving it to keep walking (VelocityControl holds
+  // the last Twist forever) until CheckProbeSettle()'s timer deletes it --
+  // see activeProbes' own comment for why that overshoot read as "the
+  // tested spot and the actual spawn spot don't match".
+  {
+    std::lock_guard<std::mutex> lock(this->poseMutex);
+    this->activeProbes[probeName] = ActiveProbe{approachStartX, approachStartY, probePublisher, false};
+  }
   gz::msgs::Twist probeTwist;
-  probeTwist.mutable_linear()->set_y(kSpawnProbeSpeed);
+  probeTwist.mutable_linear()->set_x(approachDirX * kSpawnProbeSpeed);
+  probeTwist.mutable_linear()->set_y(approachDirY * kSpawnProbeSpeed);
   probePublisher->Publish(probeTwist);
   QTimer::singleShot(100, this, [probePublisher, probeTwist]() { probePublisher->Publish(probeTwist); });
   QTimer::singleShot(300, this, [probePublisher, probeTwist]() { probePublisher->Publish(probeTwist); });
 
   QTimer::singleShot(kSpawnSafetySettleMs, this,
       [this, _modelIndex, _name, _posePreset, _followMode, _x, _y, _z, _yaw, _attempt,
-       probeName = QString::fromStdString(probeName), candidateX, candidateY, probePublisher]()
+       probeName = QString::fromStdString(probeName), candidateX, candidateY,
+       approachStartX, approachStartY, probePublisher]()
       {
         this->CheckProbeSettle(_modelIndex, _name, _posePreset, _followMode, _x, _y, _z, _yaw,
-            _attempt, probeName, candidateX, candidateY);
+            _attempt, probeName, candidateX, candidateY, approachStartX, approachStartY);
       });
 }
 
 void HumanControlPanel::CheckProbeSettle(
     int _modelIndex, QString _name, QString _posePreset, QString _followMode,
     double _x, double _y, double _z, double _yaw, int _attempt,
-    QString _probeName, double _candidateX, double _candidateY)
+    QString _probeName, double _candidateX, double _candidateY,
+    double _approachStartX, double _approachStartY)
 {
   const std::string probeNameStd = _probeName.toStdString();
   // Safe means "travelled roughly the full kSpawnGridSpacing walk in from
-  // the south", checked as distance from its OWN START point rather than
-  // proximity to the candidate -- deliberately, since nothing ever tells
-  // the probe to stop once it arrives (VelocityControl just keeps it
-  // going), so an unobstructed probe overshoots the candidate by however
-  // much extra time it got before this check ran. Measuring from the
-  // start instead means overshoot only makes "safe" more obviously true
-  // rather than corrupting the read the way distance-from-candidate would.
-  // No pose yet (never confirmed moving at all) counts as NOT safe -- a
-  // probe that should have had a full kSpawnSafetySettleMs to walk in and
-  // simply never reported a position is more likely stuck than fine.
-  const double approachStartX = _candidateX;
-  const double approachStartY = _candidateY - kSpawnGridSpacing;
+  // _approachStartX/Y" (the same point ProbeSafeSpawnPosition() dropped
+  // and launched the probe from -- radially outward from the original
+  // request, see its own comment for why that replaced a fixed
+  // south->north walk-in), checked as distance from its OWN START point
+  // rather than proximity to the candidate. OnPoseInfo() now stops the
+  // probe (zero Twist) as soon as it covers that same distance -- see
+  // activeProbes' own comment -- so this mostly reads back that stopped
+  // position; still measuring from the start (rather than
+  // distance-from-candidate) costs nothing and keeps this correct even
+  // for the rare case where this timer fires before OnPoseInfo() has
+  // caught up. No pose yet (never confirmed moving at all) counts as NOT
+  // safe -- a probe that should have had a full kSpawnSafetySettleMs to
+  // walk in and simply never reported a position is more likely stuck
+  // than fine.
   bool safe = false;
   {
     std::lock_guard<std::mutex> lock(this->poseMutex);
@@ -1089,18 +1450,28 @@ void HumanControlPanel::CheckProbeSettle(
     if (it != this->poses.end() && it->second.valid)
     {
       const double distanceFromStart =
-          std::hypot(it->second.x - approachStartX, it->second.y - approachStartY);
+          std::hypot(it->second.x - _approachStartX, it->second.y - _approachStartY);
       safe = distanceFromStart >= (kSpawnGridSpacing - kSpawnSafetyDisplacementMeters);
     }
     this->poses.erase(probeNameStd);
+    this->activeProbes.erase(probeNameStd);
   }
   // Always clean up the probe, safe or not -- it was only ever a test.
   this->RequestEntityRemoval(probeNameStd);
 
   if (safe)
   {
-    this->StartRealSpawn(
-        _modelIndex, _name, _posePreset, _followMode, _candidateX, _candidateY, _z, _yaw);
+    // Confirm the probe is actually gone -- not just guess at a delay --
+    // before spawning the real collision-body companion at essentially
+    // the same spot the probe was just occupying. See PollProbeRemoval()'s
+    // own comment for why: a real capsule (same mass, same collision
+    // shape, spawned by a brand new ros_gz_sim create call that knows
+    // nothing about the probe) starting out overlapping a probe that
+    // hasn't actually been torn down yet gets thrown apart by contact
+    // resolution the instant physics runs, which is what "the person
+    // gets launched sideways right after spawning" was.
+    this->PollProbeRemoval(QString::fromStdString(probeNameStd), _modelIndex, _name,
+        _posePreset, _followMode, _candidateX, _candidateY, _z, _yaw, 0);
   }
   else
   {
@@ -1109,6 +1480,31 @@ void HumanControlPanel::CheckProbeSettle(
     this->ProbeSafeSpawnPosition(
         _modelIndex, _name, _posePreset, _followMode, _x, _y, _z, _yaw, _attempt + 1);
   }
+}
+
+void HumanControlPanel::PollProbeRemoval(
+    QString _probeName, int _modelIndex, QString _name, QString _posePreset,
+    QString _followMode, double _candidateX, double _candidateY, double _z, double _yaw,
+    int _pollAttempt)
+{
+  const std::string probeNameStd = _probeName.toStdString();
+  if (this->QueryEntityExists(probeNameStd) && _pollAttempt < kProbeRemovalMaxAttempts)
+  {
+    QTimer::singleShot(kProbeRemovalPollIntervalMs, this,
+        [this, _probeName, _modelIndex, _name, _posePreset, _followMode,
+         _candidateX, _candidateY, _z, _yaw, _pollAttempt]()
+        {
+          this->PollProbeRemoval(_probeName, _modelIndex, _name, _posePreset, _followMode,
+              _candidateX, _candidateY, _z, _yaw, _pollAttempt + 1);
+        });
+    return;
+  }
+  // Either confirmed gone, or gave up waiting for it (spawning anyway
+  // rather than blocking forever on a removal that's stuck -- same
+  // trade-off ProbeSafeSpawnPosition() itself makes when it gives up
+  // finding a clear spot).
+  this->StartRealSpawn(
+      _modelIndex, _name, _posePreset, _followMode, _candidateX, _candidateY, _z, _yaw);
 }
 
 void HumanControlPanel::PollSpawnConfirmation(
@@ -1166,6 +1562,11 @@ void HumanControlPanel::PollSpawnConfirmation(
         std::begin(kFollowModeValues), std::end(kFollowModeValues), followModeStd);
     human.followModeIndex = followModeIt != std::end(kFollowModeValues)
         ? static_cast<int>(followModeIt - std::begin(kFollowModeValues)) : 0;
+    if (IsSitCapableIndex(modelIndex))
+    {
+      const std::string sitTopic = "/" + nameStd + "/cmd_sit";
+      human.sitPublisher = this->node.Advertise<gz::msgs::StringMsg>(sitTopic);
+    }
   }
   this->humans.push_back(std::move(human));
   const int newIndex = static_cast<int>(this->humans.size()) - 1;
@@ -1767,6 +2168,136 @@ void HumanControlPanel::ApplyViewpoint()
 
   finish();
   this->SetStatus(command.label);
+}
+
+gz::rendering::VisualPtr HumanControlPanel::FindCollisionCapsuleVisual(
+    const gz::rendering::ScenePtr &_scene, const std::string &_modelName) const
+{
+  // Exact lookup first -- the same one ApplyViewpoint() already relies on
+  // successfully for model-level nodes -- then the same "id::"-scoped
+  // suffix fallback it uses for the same reason.
+  gz::rendering::VisualPtr modelVisual = _scene->VisualByName(_modelName);
+  if (!modelVisual)
+  {
+    const std::string suffix = "::" + _modelName;
+    for (unsigned int i = 0; i < _scene->VisualCount(); ++i)
+    {
+      auto visual = _scene->VisualByIndex(i);
+      if (!visual)
+        continue;
+      const std::string &name = visual->Name();
+      if (name.size() >= suffix.size() &&
+          name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+      {
+        modelVisual = visual;
+        break;
+      }
+    }
+  }
+  if (!modelVisual)
+    return nullptr;
+
+  // modelVisual is the model's own top-level node -- it has no geometry
+  // of its own, the capsule geometry/material live on a Visual some
+  // number of levels below it (link, then visual). Recurse instead of
+  // assuming a fixed depth, since that fixed-depth assumption ("<model
+  // name>_collision::" as a plain substring, matching against a supposed
+  // "<model>::<link>::visual" name) is what silently never matched
+  // anything before this -- 当たり判定表示 doing nothing, and the capsule
+  // staying stuck at model.sdf's own baked-in 0.55 transparency (visible
+  // by default) instead of the 0.9 "hidden" state ApplyCollisionVisibility()
+  // was supposed to apply from tick one, both trace back to this search
+  // never finding its target.
+  std::function<gz::rendering::VisualPtr(const gz::rendering::VisualPtr &)> findGeometryVisual =
+      [&](const gz::rendering::VisualPtr &_visual) -> gz::rendering::VisualPtr
+  {
+    if (_visual->GeometryCount() > 0 && _visual->Material())
+      return _visual;
+    for (unsigned int i = 0; i < _visual->ChildCount(); ++i)
+    {
+      auto child = std::dynamic_pointer_cast<gz::rendering::Visual>(_visual->ChildByIndex(i));
+      if (!child)
+        continue;
+      auto found = findGeometryVisual(child);
+      if (found)
+        return found;
+    }
+    return nullptr;
+  };
+  return findGeometryVisual(modelVisual);
+}
+
+void HumanControlPanel::ApplyCollisionVisibility()
+{
+  auto scene = gz::rendering::sceneFromFirstRenderEngine();
+  if (!scene)
+    return;
+
+  for (auto &human : this->humans)
+  {
+    // Only actor-backed humans get a human_collision_body companion at
+    // all (see spawn_human.launch.py) -- same check isHumanActorAt() uses.
+    if (!human.velocityPublisher.Valid())
+      continue;
+
+    const float desired = human.showCollision
+        ? kCollisionVisibleTransparency : kCollisionHiddenTransparency;
+
+    if (human.collisionMaterial)
+    {
+      if (human.appliedCollisionTransparency != desired)
+      {
+        human.collisionMaterial->SetTransparency(desired);
+        human.appliedCollisionTransparency = desired;
+      }
+      continue;
+    }
+
+    if (human.collisionVisualRetries > kCollisionVisualMaxRetries)
+      continue;
+
+    const std::string collisionModelName = human.name + "_collision";
+    gz::rendering::VisualPtr found = this->FindCollisionCapsuleVisual(scene, collisionModelName);
+    if (!found || !found->Material())
+    {
+      // Diagnostic (fires once, on this human's very first failed search,
+      // not every retried frame): if FindCollisionCapsuleVisual() still
+      // can't find a geometry-bearing visual under collisionModelName even
+      // with the exact-name + suffix + recursive-descent lookup, dumping
+      // every scene visual whose name contains "collision" shows whatever
+      // naming scheme this gz-sim version/scene actually uses so the
+      // lookup can be adjusted to match it.
+      if (human.collisionVisualRetries == 0)
+      {
+        gzmsg << "[HumanControlPanel] collision-visual '" << collisionModelName
+              << "' not found among " << scene->VisualCount()
+              << " scene visuals. Names containing \"collision\": ";
+        unsigned int logged = 0;
+        for (unsigned int i = 0; i < scene->VisualCount() && logged < 40; ++i)
+        {
+          auto visual = scene->VisualByIndex(i);
+          if (visual && visual->Name().find("collision") != std::string::npos)
+          {
+            gzmsg << "[" << visual->Name() << "] ";
+            ++logged;
+          }
+        }
+        if (logged == 0)
+          gzmsg << "(none)";
+        gzmsg << std::endl;
+      }
+      ++human.collisionVisualRetries;
+      continue;
+    }
+    // Clone rather than mutate the shared material directly -- otherwise
+    // every human's capsule (they all reference the same SDF-defined
+    // material) would flip transparency together instead of independently.
+    auto material = found->Material()->Clone();
+    found->SetMaterial(material, false);
+    human.collisionMaterial = material;
+    human.collisionMaterial->SetTransparency(desired);
+    human.appliedCollisionTransparency = desired;
+  }
 }
 }  // namespace gz_human_sim
 

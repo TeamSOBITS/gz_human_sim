@@ -276,6 +276,33 @@ Rectangle {
             }
           }
 
+          // 当たり判定カプセルの表示切替え（人物ごと）。実際の透明度変更は
+          // HumanControlPanel::ApplyCollisionVisibility()がRenderイベントで
+          // 行う -- humansChanged()発火（setShowCollision()/
+          // setShowCollisionAll()の両方が発火させる）のたびにここで再同期する。
+          // チェックボックスではなくボタン: クリックのたびに表示⇔非表示を
+          // 切り替え、ボタンラベル自体が現在の状態を示す。
+          Button {
+            id: collisionToggleButton
+            property bool shown: false
+            visible: HumanControlPanel.isHumanActorAt(humanRow.humanIndex)
+            text: shown ? "当たり判定を非表示" : "当たり判定を表示"
+            Component.onCompleted: {
+              shown = HumanControlPanel.showCollisionAt(humanRow.humanIndex)
+            }
+            onClicked: {
+              shown = !shown
+              HumanControlPanel.setShowCollision(humanRow.humanIndex, shown)
+            }
+            Connections {
+              target: HumanControlPanel
+              function onHumansChanged() {
+                collisionToggleButton.shown =
+                    HumanControlPanel.showCollisionAt(humanRow.humanIndex)
+              }
+            }
+          }
+
           // Teleop pad: press-and-hold buttons publish Twist while pressed
           // and stop on release. Layout mirrors the QWEASDZXC keyboard
           // shortcuts in HumanControlPanel::eventFilter() (Q W E / A S D /
@@ -502,6 +529,122 @@ Rectangle {
       }
     }
 
+    // ── Sit (walking_actor only) ───────────────────────────
+    // Mouse equivalent of holding K / K+Space: toggling this button alone
+    // is enough to sit the active human down and keep them seated (locked),
+    // same as pressing Space without ever touching K -- see
+    // HumanControlPanel::UpdateSitIntent().
+    Rectangle {
+      Layout.fillWidth: true; height: 1; color: "#c7d8d4"
+      visible: HumanControlPanel.activeHumanIndex >= 0 &&
+          HumanControlPanel.isSitCapableHumanAt(HumanControlPanel.activeHumanIndex)
+    }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      visible: HumanControlPanel.activeHumanIndex >= 0 &&
+          HumanControlPanel.isSitCapableHumanAt(HumanControlPanel.activeHumanIndex)
+      Label { text: "着席"; color: "#183b37"; font.bold: true }
+      Button {
+        id: sitLockButton
+        Layout.fillWidth: true
+        text: HumanControlPanel.activeSitLocked ? "立たせる（固定解除）" : "座らせる（固定）"
+        onClicked: HumanControlPanel.toggleSitLock(HumanControlPanel.activeHumanIndex)
+      }
+    }
+
+    // ── 当たり判定（衝突カプセルの表示・サイズ） ─────────────
+    // 表示/非表示そのものは人物リストの各行のボタン（上）で個別に切り替える。
+    // ここは「全員まとめて」操作と、対象人物（activeHumanIndex）のカプセル
+    // サイズ変更 -- gz-simにはその場で形状を連続変形する機能がないため、
+    // スライダーは値を保持するだけで、「サイズを適用」を押した瞬間だけ
+    // HumanControlPanel::applyCollisionSize()が呼ばれ、削除→新サイズで再生成
+    // される（ドラッグ中に何度も再生成されないように）。
+    Rectangle { Layout.fillWidth: true; height: 1; color: "#c7d8d4" }
+    Label { text: "当たり判定"; color: "#183b37"; font.bold: true }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      Label { text: "表示"; color: "#536b67" }
+      // 表示/非表示を1つのボタンで切り替える（個別行と同じ「ラベルが現在の
+      // 状態を示すトグルボタン」方式）。全員の状態が揃っていない場合も
+      // 単に次にどちらへ切り替えるかだけを示す。
+      Button {
+        id: collisionAllToggleButton
+        property bool allShown: false
+        text: allShown ? "全員非表示にする" : "全員表示にする"
+        onClicked: {
+          allShown = !allShown
+          HumanControlPanel.setShowCollisionAll(allShown)
+        }
+      }
+    }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 4
+      visible: HumanControlPanel.activeHumanIndex >= 0 &&
+          HumanControlPanel.isHumanActorAt(HumanControlPanel.activeHumanIndex)
+      Label { text: "半径[m]"; color: "#536b67" }
+      Slider {
+        id: collisionRadiusSlider
+        Layout.fillWidth: true
+        from: 0.15
+        to: 0.5
+        Component.onCompleted: {
+          value = HumanControlPanel.activeHumanIndex >= 0
+              ? HumanControlPanel.collisionRadiusAt(HumanControlPanel.activeHumanIndex) : 0.25
+        }
+      }
+      Label {
+        text: collisionRadiusSlider.value.toFixed(2)
+        color: "#536b67"
+        Layout.preferredWidth: 34
+      }
+    }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 4
+      visible: HumanControlPanel.activeHumanIndex >= 0 &&
+          HumanControlPanel.isHumanActorAt(HumanControlPanel.activeHumanIndex)
+      Label { text: "長さ[m]"; color: "#536b67" }
+      Slider {
+        id: collisionLengthSlider
+        Layout.fillWidth: true
+        from: 0.5
+        to: 2.0
+        Component.onCompleted: {
+          value = HumanControlPanel.activeHumanIndex >= 0
+              ? HumanControlPanel.collisionLengthAt(HumanControlPanel.activeHumanIndex) : 1.2
+        }
+      }
+      Label {
+        text: collisionLengthSlider.value.toFixed(2)
+        color: "#536b67"
+        Layout.preferredWidth: 34
+      }
+      Button {
+        // 半径/長さスライダーの値を確定してカプセルへ反映するボタン --
+        // スライダーをドラッグしている間は何もせず、押した瞬間だけ
+        // HumanControlPanel::applyCollisionSize()が呼ばれる。「決定」だと
+        // 何を確定するのか伝わらないため、対象を明示したラベルにしている。
+        text: "このサイズを当たり判定に適用"
+        onClicked: HumanControlPanel.applyCollisionSize(
+            HumanControlPanel.activeHumanIndex,
+            collisionRadiusSlider.value, collisionLengthSlider.value)
+      }
+    }
+    Connections {
+      target: HumanControlPanel
+      function onActiveHumanChanged() {
+        if (HumanControlPanel.activeHumanIndex < 0)
+          return
+        collisionRadiusSlider.value =
+            HumanControlPanel.collisionRadiusAt(HumanControlPanel.activeHumanIndex)
+        collisionLengthSlider.value =
+            HumanControlPanel.collisionLengthAt(HumanControlPanel.activeHumanIndex)
+      }
+    }
+
     // ── Path templates ─────────────────────────────────────
     // Same "対象" (activeHumanIndex) as the viewpoint block above -- one
     // global control, not one per row. New shapes only ever need a new
@@ -602,6 +745,18 @@ Rectangle {
       text: "Enterキーでその場ジャンプ（移動キーを押しながらだとその方向に進みつつ" +
           "ジャンプ）。空中でもう一度Enterを押すと二段ジャンプできます。" +
           "ジャンプの高さは上のスライダーで調整できます。"
+      color: "#7b928d"
+      font.pixelSize: 11
+      wrapMode: Text.Wrap
+    }
+    Label {
+      Layout.fillWidth: true
+      visible: HumanControlPanel.activeHumanIndex >= 0 &&
+          HumanControlPanel.isSitCapableHumanAt(HumanControlPanel.activeHumanIndex)
+      text: "Kを押している間だけ座ります（離すと立ちます）。Kを押しながら" +
+          "Spaceを押すと座ったまま固定され、Kを離しても座り続けます。" +
+          "もう一度Spaceを押すと固定を解除して立ちます（上の「座らせる」" +
+          "ボタンでも同じ操作ができます）。"
       color: "#7b928d"
       font.pixelSize: 11
       wrapMode: Text.Wrap

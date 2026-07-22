@@ -26,11 +26,13 @@
         <li><a href="#humanをspawnする">humanをspawnする</a></li>
         <li><a href="#spawnと同時にteleopを起動する">spawnと同時にteleopを起動する</a></li>
         <li><a href="#複数のhumanをspawnする">複数のhumanをspawnする</a></li>
+        <li><a href="#walking_actorを座らせる">walking_actorを座らせる</a></li>
         <li><a href="#主なlaunch引数">主なlaunch引数</a></li>
       </ul>
     </li>
     <li><a href="#パッケージ構成">パッケージ構成</a></li>
     <li><a href="#マイルストーン">マイルストーン</a></li>
+    <li><a href="#参考資料">参考資料</a></li>
   </ol>
 </details>
 
@@ -221,6 +223,23 @@ $ ros2 launch gz_human_sim spawn_human.launch.py \
 <p align="right">(<a href="#readme-top">上に戻る</a>)</p>
 
 
+### walking_actorを座らせる
+
+`walking_actor` は Gazebo GUI の Human Control パネルから座らせることができます
+（`sit_down` → `sitting` → `stand_up` のアニメーション遷移込み）．座っている間は
+その場に固定され，移動コマンドは無視されます．
+
+- キーボード `K` を押している間だけ座り，離すと立ちます．
+- `K` を押しながら `Space` を押すと座ったまま固定され，`K` を離しても座り続けます．
+  もう一度 `Space` を押すと固定を解除して立ちます．
+- パネル内の「座らせる（固定）」ボタンでも同じ操作ができます（`K` を使わずに固定できます）．
+
+`DoctorFemaleWalk` には座りアニメーション用のメッシュがないため，この機能は
+`walking_actor` のみが対象です．
+
+<p align="right">(<a href="#readme-top">上に戻る</a>)</p>
+
+
 ### 主なlaunch引数
 
 `spawn_human.launch.py` の主な引数は以下の通りです．
@@ -249,6 +268,9 @@ $ ros2 launch gz_human_sim spawn_human.launch.py \
   - `cmd_vel` を受け取り Gazebo の human pose を更新するノード
 - `models/walking_actor.sdf`
   - actor animation 用の SDF
+- `src/actor_command_plugin.cpp`
+  - actor の移動（cmd_vel/cmd_path/follow_mode）・jump・座り状態機械
+    （sit_down/sitting/stand_up の切り替えと移動の凍結）を担当する Gazebo plugin
 - `src/actor_animation_control_plugin.cpp`
   - actor の animation 制御用 Gazebo plugin
 
@@ -270,6 +292,15 @@ $ ros2 launch gz_human_sim spawn_human.launch.py \
 - [ ] actor animation の拡張
 
 現時点のバグや新規機能の依頼を確認するために [Issue ページ][issues-url] をご覧ください．
+
+<p align="right">(<a href="#readme-top">上に戻る</a>)</p>
+
+
+<!-- 参考資料 -->
+## 参考資料
+
+- [blackcoffeerobotics/gazebo-ros-actor-plugin](https://github.com/blackcoffeerobotics/gazebo-ros-actor-plugin)
+  - ROS actor plugin．`src/gazebo-ros-actor-plugin`（`jazzy-harmonic` ブランチ，Gazebo Sim / ROS 2 Jazzy 対応版）を vendor しており，`actor_command_plugin.cpp` / `actor_animation_control_plugin.cpp` の元となった参考実装．
 
 <p align="right">(<a href="#readme-top">上に戻る</a>)</p>
 

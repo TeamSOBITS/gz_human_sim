@@ -26,11 +26,13 @@
         <li><a href="#spawn-a-human">Spawn a Human</a></li>
         <li><a href="#spawn-and-start-teleop">Spawn and Start Teleop</a></li>
         <li><a href="#spawn-multiple-humans">Spawn Multiple Humans</a></li>
+        <li><a href="#making-walking_actor-sit">Making walking_actor Sit</a></li>
         <li><a href="#main-launch-arguments">Main Launch Arguments</a></li>
       </ul>
     </li>
     <li><a href="#package-layout">Package Layout</a></li>
     <li><a href="#milestones">Milestones</a></li>
+    <li><a href="#references">References</a></li>
   </ol>
 </details>
 
@@ -221,6 +223,24 @@ $ ros2 launch gz_human_sim spawn_human.launch.py \
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 
+### Making walking_actor Sit
+
+`walking_actor` can be made to sit from the Gazebo GUI's Human Control panel
+(with a `sit_down` → `sitting` → `stand_up` animation transition). While
+seated, it stays fixed in place and ignores movement commands.
+
+- Hold the `K` key to sit; release it to stand back up.
+- While holding `K`, press `Space` to lock the sit -- it stays seated even
+  after `K` is released. Press `Space` again to release the lock and stand.
+- The panel's "座らせる（固定）" ("Sit (lock)") button does the same thing
+  without needing `K`.
+
+`DoctorFemaleWalk` has no sit animation meshes, so this feature only applies
+to `walking_actor`.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+
 ### Main Launch Arguments
 
 Main arguments of `spawn_human.launch.py`:
@@ -249,6 +269,10 @@ Main arguments of `spawn_human.launch.py`:
   - Node that updates the Gazebo human pose from `cmd_vel`
 - `models/walking_actor.sdf`
   - SDF for actor-based animation
+- `src/actor_command_plugin.cpp`
+  - Gazebo plugin handling actor movement (cmd_vel/cmd_path/follow_mode),
+    jump, and the sit state machine (switching between sit_down/sitting/
+    stand_up and freezing movement while seated)
 - `src/actor_animation_control_plugin.cpp`
   - Gazebo plugin for actor animation control
 
@@ -267,9 +291,21 @@ Related package paths:
 
 - [ ] Human model generation using sam3_body
 - [ ] Body link remapping support
-- [ ] Extended actor animation support
+- [x] Extended actor animation support (walking_actor sit motion)
 
 Please see the [Issues page][issues-url] for current bugs and feature requests.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+
+<!-- References -->
+## References
+
+- [blackcoffeerobotics/gazebo-ros-actor-plugin](https://github.com/blackcoffeerobotics/gazebo-ros-actor-plugin)
+  - ROS actor plugin. `src/gazebo-ros-actor-plugin` (the `jazzy-harmonic`
+    branch, targeting Gazebo Sim / ROS 2 Jazzy) is vendored here and was the
+    reference implementation `actor_command_plugin.cpp` /
+    `actor_animation_control_plugin.cpp` are based on.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

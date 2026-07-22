@@ -22,6 +22,7 @@ ACTOR_MODEL_NAMES = ('walking_actor', 'DoctorFemaleWalk')
 
 def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
                          remove_topic, follow_mode_topic, jump_topic='/cmd_jump',
+                         sit_topic='/cmd_sit',
                          collision_model_name='', collision_cmd_vel_topic='',
                          follow_mode='auto', animation_name='walk', animation_factor=4.0,
                          linear_velocity=1.0, linear_tolerance=0.1):
@@ -73,6 +74,8 @@ def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
             f'<follow_mode_topic>{follow_mode_topic}</follow_mode_topic>', 1)
         resolved_text = resolved_text.replace(
             '<jump_topic>/cmd_jump</jump_topic>', f'<jump_topic>{jump_topic}</jump_topic>', 1)
+        resolved_text = resolved_text.replace(
+            '<sit_topic>/cmd_sit</sit_topic>', f'<sit_topic>{sit_topic}</sit_topic>', 1)
         resolved_text = resolved_text.replace(
             '<collision_model_name></collision_model_name>',
             f'<collision_model_name>{collision_model_name}</collision_model_name>', 1)

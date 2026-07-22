@@ -10,6 +10,7 @@
       <remove_topic>/remove_actor</remove_topic>
       <follow_mode_topic>/set_follow_mode</follow_mode_topic>
       <jump_topic>/cmd_jump</jump_topic>
+      <sit_topic>/cmd_sit</sit_topic>
       <collision_model_name></collision_model_name>
       <collision_cmd_vel_topic></collision_cmd_vel_topic>
       <!-- auto: path if one is active, else velocity (default) / path / velocity -->
@@ -25,6 +26,18 @@
     </skin>
     <animation name="walk">
       <filename>model://walking_actor/meshes/walk.dae</filename>
+      <interpolate_x>false</interpolate_x>
+    </animation>
+    <animation name="sit_down">
+      <filename>model://walking_actor/meshes/sit_down.dae</filename>
+      <interpolate_x>false</interpolate_x>
+    </animation>
+    <animation name="sitting">
+      <filename>model://walking_actor/meshes/sitting.dae</filename>
+      <interpolate_x>false</interpolate_x>
+    </animation>
+    <animation name="stand_up">
+      <filename>model://walking_actor/meshes/stand_up.dae</filename>
       <interpolate_x>false</interpolate_x>
     </animation>
   </actor>

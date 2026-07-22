@@ -1,14 +1,14 @@
 <?xml version="1.0" ?>
 <sdf version="1.9">
   <model name="human_collision_body">
-    <!-- Invisible physics body that stands in for a gz_human_sim actor's
-         real-world footprint. Actors (see walking_actor/model.sdf,
+    <!-- Physics body that stands in for a gz_human_sim actor's real-world
+         footprint. Actors (see walking_actor/model.sdf,
          DoctorFemaleWalk/model.sdf) are <actor> entities animated by
          directly overwriting TrajectoryPose every tick -- a pure
          kinematic teleport with zero physics/collision involvement (this
          is a gz-sim limitation, not something specific to this package).
          So instead of trying to collide the actor itself, this ordinary
-         dynamic <model> -- a simple standing cylinder with real mass and
+         dynamic <model> -- a simple standing capsule with real mass and
          collision -- is spawned alongside each actor, driven by the
          stock gz-sim VelocityControl system (same commanded body-frame
          velocity ActorCommandPlugin would otherwise apply directly), and
@@ -18,13 +18,25 @@
          human_model_utils.py's resolve_collision_body_model() for how
          the name/topic placeholders below get substituted per spawn.
 
-         No <visual> on purpose: this body is only ever meant to be felt,
-         not seen -- the actor's own skinned mesh is the visible human. -->
+         Capsule (a cylinder with hemispherical caps) rather than a plain
+         cylinder: cylinders have a flat-edged top/bottom that can catch
+         awkwardly on other collision geometry, whereas a capsule is the
+         standard human-body approximation shape across robotics sims
+         (no edges, cheap to collide) -- see gz_human_sim's README for the
+         longer writeup on why this project doesn't attempt true
+         skeleton-tracking collision (no such capability exists in gz-sim).
+
+         Has a <visual> on purpose, unlike earlier revisions of this file:
+         it's a debug aid for seeing exactly where this body's collision
+         volume is (translucent so it doesn't visually compete with the
+         actor's own skinned mesh, which remains the "real" visible
+         human). -->
     <static>false</static>
     <link name="body">
-      <!-- Roughly adult-human: ~70 kg, standing cylinder 0.5 m diameter,
-           1.7 m tall, centered at half its own height so its base sits
-           on the ground plane like the actor models do. -->
+      <!-- Roughly adult-human: ~70 kg, standing capsule 0.5 m diameter,
+           1.7 m tall overall (1.2 m cylindrical section + two 0.25 m
+           hemispherical caps), centered at half its own height so its
+           base sits on the ground plane like the actor models do. -->
       <pose>0 0 0.85 0 0 0</pose>
       <!-- Ixx/Iyy (resistance to toppling/rolling) are set absurdly high
            on purpose, nowhere near a real human's ~17.87 -- confirmed by
@@ -51,10 +63,10 @@
       </inertial>
       <collision name="collision">
         <geometry>
-          <cylinder>
+          <capsule>
             <radius>0.25</radius>
-            <length>1.7</length>
-          </cylinder>
+            <length>1.2</length>
+          </capsule>
         </geometry>
         <!-- Lower-than-default floor friction: reduces base-contact
              torque (the actual tipping trigger above) further, without
@@ -69,6 +81,26 @@
           </friction>
         </surface>
       </collision>
+      <visual name="visual">
+        <!-- Same capsule as the collision above -- this is a debug view
+             of the collision volume itself, not a separate cosmetic
+             shape, so the two must always match. Translucent orange:
+             distinct from both the actor's own skin tones and typical
+             world/furniture colors, and low enough opacity to still see
+             the actor's real mesh through it. -->
+        <geometry>
+          <capsule>
+            <radius>0.25</radius>
+            <length>1.2</length>
+          </capsule>
+        </geometry>
+        <material>
+          <ambient>1.0 0.55 0.0 1.0</ambient>
+          <diffuse>1.0 0.55 0.0 1.0</diffuse>
+          <emissive>0.3 0.15 0.0 1.0</emissive>
+        </material>
+        <transparency>0.55</transparency>
+      </visual>
     </link>
     <!-- topic is rewritten to /model/<spawn name>/cmd_vel by
          resolve_collision_body_model(); ActorCommandPlugin publishes the

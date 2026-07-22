@@ -3,8 +3,10 @@
 
 #include <chrono>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <QObject>
@@ -71,6 +73,17 @@ class HumanControlPanel : public gz::gui::Plugin
   // forward) instead of the default turn-to-face-then-walk. See
   // PressDirectionKey()/the eventFilter() diagonal-key branch.
   Q_PROPERTY(bool jHeld READ JHeld NOTIFY jHeldChanged)
+  // Held state of K -- hold to sit (walking_actor only, see
+  // IsSitCapableIndex() in the .cc): press publishes a "sit" intent on the
+  // active human's sit_topic, release publishes "stand" again unless the
+  // sit is currently locked (see activeSitLocked below). Space toggles the
+  // lock while K is (or was) held -- see eventFilter()/toggleSitLock().
+  Q_PROPERTY(bool kHeld READ KHeld NOTIFY kHeldChanged)
+  // Whether the active human's sit state is currently locked (Space), i.e.
+  // stays seated even after K is released. Mirrors activeFollowModeIndex's
+  // pattern: per-human state (Human::sitLocked), reflected here only for
+  // whichever human is "対象" right now, for the QML toggle button/legend.
+  Q_PROPERTY(bool activeSitLocked READ ActiveSitLocked NOTIFY activeSitLockedChanged)
   // Jump peak height (meters) used by teleopJump()/the Enter-key shortcut --
   // a global setting like shiftHeld above, not per-human. Adjustable live
   // from the QML slider (setJumpHeight()).
@@ -110,6 +123,8 @@ class HumanControlPanel : public gz::gui::Plugin
   public: bool CtrlHeld() const;
   public: bool SHeld() const;
   public: bool JHeld() const;
+  public: bool KHeld() const;
+  public: bool ActiveSitLocked() const;
   public: double JumpHeight() const;
   public: double SpeedMultiplier() const;
   public: int ActiveViewIndex() const;
@@ -146,6 +161,23 @@ class HumanControlPanel : public gz::gui::Plugin
   /// follow_mode means nothing for them.
   public: Q_INVOKABLE bool isActorModel(int _modelIndex) const;
 
+  /// \brief Whether a model index has sit_down/sitting/stand_up meshes
+  /// (currently walking_actor only) -- narrower than isActorModel(),
+  /// drives the spawn form's/panel's sit control visibility.
+  public: Q_INVOKABLE bool isSitCapableModel(int _modelIndex) const;
+
+  /// \brief Same as isHumanActorAt() but for the sit feature -- whether the
+  /// spawned human at this humanList row can sit (walking_actor only).
+  public: Q_INVOKABLE bool isSitCapableHumanAt(int _index) const;
+
+  /// \brief Toggle _index's sit lock (Space key, or the QML sit button):
+  /// on its own (K never held) this alone is enough to make the human sit
+  /// and stay seated, since the effective intent published to sit_topic is
+  /// "locked OR K held" -- see UpdateSitIntent() in the .cc. Pressing it
+  /// again while locked releases the lock, dropping back to whatever K is
+  /// currently doing (stood up, if K also isn't held).
+  public: Q_INVOKABLE void toggleSitLock(int _index);
+
   /// \brief Raw ActorCommandPlugin follow_mode string ("auto"/"path"/
   /// "velocity") for a FollowModeLabels() index, to pass into spawnHuman().
   public: Q_INVOKABLE QString followModeValue(int _followModeIndex) const;
@@ -161,6 +193,36 @@ class HumanControlPanel : public gz::gui::Plugin
   /// humanList, not a humanModels index) is an actor model — drives the
   /// QML teleop pad's visibility per-row.
   public: Q_INVOKABLE bool isHumanActorAt(int _index) const;
+
+  /// \brief Current showCollision state for row _index, for the per-row
+  /// QML checkbox to read back (e.g. after setShowCollisionAll() changes
+  /// it out from under a row that isn't "対象" right now).
+  public: Q_INVOKABLE bool showCollisionAt(int _index) const;
+
+  /// \brief Toggle _index's collision-body debug capsule between hidden
+  /// (translucent, the default) and shown (clearly colored) -- actually
+  /// applied on the render thread by ApplyCollisionVisibility(), not here.
+  /// No-op for non-actor humans (no collision-body companion to show).
+  public: Q_INVOKABLE void setShowCollision(int _index, bool _value);
+
+  /// \brief setShowCollision() for every currently-spawned human at once.
+  public: Q_INVOKABLE void setShowCollisionAll(bool _value);
+
+  /// \brief Current capsule dimensions for row _index (see
+  /// Human::collisionRadius/collisionLength), for the QML size sliders to
+  /// initialize/resync from when switching which human is active.
+  public: Q_INVOKABLE double collisionRadiusAt(int _index) const;
+  public: Q_INVOKABLE double collisionLengthAt(int _index) const;
+
+  /// \brief Rebuild _index's collision-body companion at a new capsule
+  /// size. gz-sim has no way to resize a shape in place (see the
+  /// implementation's own comment), so this removes the existing
+  /// companion and spawns a fresh one from human_collision_body/
+  /// model.sdf's template with new <radius>/<length> values, at the same
+  /// position the old one was at. ActorCommandPlugin re-resolves its
+  /// cached collision entity by name on its own the next tick, so nothing
+  /// on that side needs to know this happened.
+  public: Q_INVOKABLE void applyCollisionSize(int _index, double _radius, double _length);
 
   /// \brief _followMode is only meaningful when isActorModel(_modelIndex)
   /// is true; ignored (may be empty) for static models. Raw ActorCommandPlugin
@@ -287,6 +349,13 @@ class HumanControlPanel : public gz::gui::Plugin
     // to, rather than always resetting to "テレオペ".
     gz::transport::Node::Publisher followModePublisher;
     int followModeIndex{0};
+    // Sit/stand intent (setSit_topic) -- only advertised for sit-capable
+    // actor humans (see IsSitCapableIndex()), same as jumpPublisher above.
+    // sitLocked is Space's toggle state: true means this human stays
+    // seated even after K is released -- see UpdateSitIntent()/
+    // toggleSitLock() in the .cc.
+    gz::transport::Node::Publisher sitPublisher;
+    bool sitLocked{false};
     // Bumped by every teleopDirection()/teleopStop() call for this human.
     // "X" schedules a delayed second Twist (see teleopDirection()); that
     // callback only fires if this still matches the value it captured,
@@ -299,6 +368,28 @@ class HumanControlPanel : public gz::gui::Plugin
     // of always resetting to "自由視点".
     int viewIndex{0};
     double viewDistance{2.0};
+
+    // Collision-body debug visualization (see human_collision_body/
+    // model.sdf's translucent capsule) -- only meaningful for actor-backed
+    // humans, same as velocityPublisher above (checked the same way:
+    // velocityPublisher.Valid()). showCollision is the desired on/off
+    // state (setShowCollision()/setShowCollisionAll()); collisionMaterial/
+    // appliedCollisionTransparency/collisionVisualRetries are
+    // ApplyCollisionVisibility()'s own render-thread bookkeeping once it
+    // finds and clones this human's collision-body visual material (a
+    // clone so mutating transparency doesn't affect any other visual that
+    // happens to share the same underlying material instance).
+    bool showCollision{false};
+    gz::rendering::MaterialPtr collisionMaterial;
+    float appliedCollisionTransparency{-1.0f};
+    int collisionVisualRetries{0};
+    // Current capsule dimensions, updated by applyCollisionSize() -- kept
+    // here so the QML size sliders can read back what's actually applied
+    // (collisionRadiusAt()/collisionLengthAt()) when switching which human
+    // is active, same idea as followModeIndex/viewIndex above. Defaults
+    // match models/human_collision_body/model.sdf's own spawn-time values.
+    double collisionRadius{0.25};
+    double collisionLength{1.2};
   };
 
   /// \brief Pending camera command, written on the Qt thread by
@@ -343,6 +434,16 @@ class HumanControlPanel : public gz::gui::Plugin
   /// via their own remove-topic instead (see removeHuman()).
   private: void RequestEntityRemoval(const std::string &_name);
 
+  /// \brief Fire-and-forget /world/<w>/create request for a MODEL entity
+  /// (gz::msgs::EntityFactory: _sdf as the raw SDF text, _name as the
+  /// entity name, position only -- capsules are rotationally symmetric
+  /// about Z so no orientation is needed). Same request shape
+  /// ProbeSafeSpawnPosition() already builds inline for its throwaway
+  /// probes; pulled out here since applyCollisionSize() needs the same
+  /// call for a real (non-probe) respawn.
+  private: void RequestEntityCreation(const std::string &_sdf,
+      const std::string &_name, double _x, double _y, double _z);
+
   /// \brief Synchronous, short-timeout query of /world/<w>/scene/info for
   /// whether a model named _name currently exists. Used instead of trusting
   /// spawn/remove service acks (gz-sim's create/remove services both return
@@ -361,33 +462,66 @@ class HumanControlPanel : public gz::gui::Plugin
       int _modelIndex, QString _name, QString _posePreset, QString _followMode,
       double _x, double _y, double _z, double _yaw);
 
-  /// \brief Spawns a throwaway, invisible probe (the same physics
-  /// collision body every actor gets paired with -- see
-  /// models/human_collision_body/model.sdf and collisionBodyTemplate) at
-  /// (_x, _y) and, once it's had a moment to settle, checks whether
+  /// \brief Spawns a throwaway probe (the same physics collision body
+  /// every actor gets paired with, briefly visible as a translucent
+  /// capsule -- see models/human_collision_body/model.sdf and
+  /// collisionBodyTemplate) at (_x, _y) and, once it's had a moment to
+  /// settle, checks whether
   /// gz-sim's own contact/penetration resolution pushed it away from
   /// where it was dropped -- the same signal that made a bare (0,0)
   /// spawn end up embedded in rcjo2025_arena's center wall. _attempt
-  /// indexes into the same kSpawnGridSpacing/kSpawnGridColumns grid
-  /// nextSpawnX()/nextSpawnY() already use, walked outward from the
-  /// original (_x, _y) until CheckProbeSettle() finds one that's clear,
-  /// or gives up after kSpawnSafetyMaxAttempts and spawns at the
-  /// original position anyway (better than refusing to spawn at all).
+  /// indexes into SpawnSpiralOffset(), walked outward in a nearest-first
+  /// spiral from the original (_x, _y) until CheckProbeSettle() finds one
+  /// that's clear, or gives up after kSpawnSafetyMaxAttempts and spawns at
+  /// the original position anyway (better than refusing to spawn at all).
   private: void ProbeSafeSpawnPosition(
       int _modelIndex, QString _name, QString _posePreset, QString _followMode,
       double _x, double _y, double _z, double _yaw, int _attempt);
 
+  /// \brief _attempt-th (dx, dy) offset (metres, in kSpawnGridSpacing
+  /// steps) for ProbeSafeSpawnPosition() to add to the user-requested
+  /// (_x, _y), ordered by ascending distance from (0, 0) -- attempt 0 is
+  /// always (0, 0) itself (the exact requested point), then the 8
+  /// neighbours at one grid step out, then the next ring, and so on. This
+  /// replaces the old one-quadrant row-major grid ((attempt % columns,
+  /// attempt / columns), which only ever walked +X/+Y from the requested
+  /// point) with a search that tries every direction, nearest candidates
+  /// first -- important now that (_x, _y) is meant to be exactly where
+  /// the user asked for (e.g. a future mouse-click spawn), so the first
+  /// clear spot found should also be the closest one to it.
+  private: std::pair<double, double> SpawnSpiralOffset(int _attempt) const;
+
   /// \brief ProbeSafeSpawnPosition()'s follow-up, kSpawnSafetySettleMs
   /// later: reads the probe's settled pose from the poses cache (see
   /// OnPoseInfo()), removes the probe either way, and either proceeds to
-  /// StartRealSpawn() at (_candidateX, _candidateY) if it barely moved
-  /// from where it was dropped, or retries ProbeSafeSpawnPosition() at
-  /// the next grid slot if it got pushed away (still overlapping
-  /// something).
+  /// StartRealSpawn() at (_candidateX, _candidateY) if it travelled the
+  /// full approach distance from (_approachStartX, _approachStartY), or
+  /// retries ProbeSafeSpawnPosition() at the next spiral slot if it got
+  /// pushed away (still overlapping something).
   private: void CheckProbeSettle(
       int _modelIndex, QString _name, QString _posePreset, QString _followMode,
       double _x, double _y, double _z, double _yaw, int _attempt,
-      QString _probeName, double _candidateX, double _candidateY);
+      QString _probeName, double _candidateX, double _candidateY,
+      double _approachStartX, double _approachStartY);
+
+  /// \brief CheckProbeSettle()'s follow-up when the candidate was judged
+  /// safe: polls QueryEntityExists() for the just-removed probe until it's
+  /// actually gone (or gives up after kProbeRemovalMaxAttempts and spawns
+  /// anyway -- a rare residual overlap is better than blocking forever on
+  /// a removal that's stuck), then calls StartRealSpawn() at
+  /// (_candidateX, _candidateY). A fixed delay here previously just
+  /// guessed at how long removal takes (the same class of race
+  /// applyCollisionSize() already has to guard against, see its own
+  /// comment) -- confirming it explicitly removes the guess: spawning the
+  /// real collision-body companion while the probe (same mass, same
+  /// collision shape) is still physically present at essentially the same
+  /// spot is what was launching the actor sideways right after spawn (the
+  /// actor, perfectly slaved to its companion now, faithfully following
+  /// that companion's post-collision physics).
+  private: void PollProbeRemoval(
+      QString _probeName, int _modelIndex, QString _name, QString _posePreset,
+      QString _followMode, double _candidateX, double _candidateY, double _z, double _yaw,
+      int _pollAttempt);
 
   /// \brief Poll QueryEntityExists() every ~500ms (up to ~10s) for a
   /// just-requested spawn. Finalizes the Human entry (list + publishers +
@@ -405,6 +539,31 @@ class HumanControlPanel : public gz::gui::Plugin
   /// \brief Render-thread only: apply the pending ViewCommand to the GUI
   /// user camera (retrying while the target model is still spawning).
   private: void ApplyViewpoint();
+
+  /// \brief Render-thread only, called from the same eventFilter() Render
+  /// branch as ApplyViewpoint(): for every actor-backed human, finds its
+  /// collision-body companion's Visual in the render scene (retrying
+  /// while it's still spawning, same idea as ApplyViewpoint()'s target
+  /// search), clones its material once, and keeps that material's
+  /// transparency in sync with Human::showCollision. Writing
+  /// components::Transparency on the ECM side was considered and rejected
+  /// -- confirmed (by reading gz-sim's own RenderUtil.cc/SceneManager.cc)
+  /// that it's only ever read once, at the moment a Visual entity is
+  /// first created, not watched for changes afterward.
+  private: void ApplyCollisionVisibility();
+
+  /// \brief Finds the render-scene Visual that actually carries the named
+  /// collision-body model's capsule geometry (the one with a non-null
+  /// Material() -- see ApplyCollisionVisibility()). Tries an exact
+  /// scene->VisualByName(_modelName) first (the same lookup ApplyViewpoint()
+  /// already relies on for model-level nodes), falling back to an "id::"-
+  /// scoped suffix match for the same reason ApplyViewpoint() needs one;
+  /// either way this only ever lands on the model's own top-level node, so
+  /// it then recurses through children (link, then visual) looking for the
+  /// first one with its own geometry/material rather than assuming a fixed
+  /// "<model>::<link>::visual" depth.
+  private: gz::rendering::VisualPtr FindCollisionCapsuleVisual(
+      const gz::rendering::ScenePtr &_scene, const std::string &_modelName) const;
 
   /// \brief Key-down handler for W/A/D/X: adds _direction to
   /// heldDirectionKeys (capped at 2 -- a 3rd simultaneous press is
@@ -459,6 +618,14 @@ class HumanControlPanel : public gz::gui::Plugin
   /// still pick up a new Ctrl/Shift/J state on their next press.
   private: void RefreshHeldMovementSpeed();
 
+  /// \brief Recomputes _index's effective sit intent (human.sitLocked ||
+  /// kHeldState) and publishes "sit"/"stand" to its sitPublisher. Called
+  /// from eventFilter() on every K press/release and from toggleSitLock()
+  /// -- see the Q_PROPERTY(kHeld)/Q_PROPERTY(activeSitLocked) comments in
+  /// the header for the overall K+Space design. No-op for non-sit-capable
+  /// or non-actor humans (sitPublisher not advertised for those).
+  private: void UpdateSitIntent(int _index);
+
   /// \brief this->speedMultiplierState (the QML slider's baseline) scaled
   /// by kSlowFactor if Ctrl is held, kRunFactor if Shift is held, or 1.0 if
   /// neither -- Ctrl and Shift aren't meant to combine, so Ctrl wins if
@@ -485,6 +652,7 @@ class HumanControlPanel : public gz::gui::Plugin
   private: bool ctrlHeldState{false};
   private: bool sHeldState{false};
   private: bool jHeldState{false};
+  private: bool kHeldState{false};
   private: double jumpHeightState{1.0};
   private: double speedMultiplierState{1.0};
 
@@ -517,6 +685,31 @@ class HumanControlPanel : public gz::gui::Plugin
   private: std::map<std::string, CachedPose> poses;
   private: bool poseSubscribed{false};
 
+  private: struct ActiveProbe
+  {
+    double startX{0.0};
+    double startY{0.0};
+    std::shared_ptr<gz::transport::Node::Publisher> publisher;
+    bool stopped{false};
+  };
+  /// \brief In-flight spawn-safety probes (see ProbeSafeSpawnPosition()),
+  /// keyed by probe name, guarded by poseMutex (same lock as poses --
+  /// OnPoseInfo() updates both together on the transport thread). Nothing
+  /// ever told a probe to stop walking once it reached its candidate
+  /// point -- VelocityControl just kept integrating the last Twist it
+  /// got -- so by the time CheckProbeSettle()'s kSpawnSafetySettleMs timer
+  /// fired, an unobstructed probe had overshot the candidate by however
+  /// far the remaining settle time let it walk. CheckProbeSettle() itself
+  /// still judges/spawns using the original candidate coordinates (never
+  /// the probe's overshot position), so the real human always landed in
+  /// the right place -- but the probe itself (the same translucent orange
+  /// capsule the 当たり判定表示 toggle controls elsewhere) was visibly still
+  /// walking past that point when it got deleted, reading as "the tested
+  /// spot and the actual spawn spot don't match". OnPoseInfo() now stops
+  /// each probe here as soon as it has travelled the full approach
+  /// distance, so its last visible position is the candidate itself.
+  private: std::map<std::string, ActiveProbe> activeProbes;
+
   /// \brief Raw text of models/human_collision_body/model.sdf, read once
   /// in LoadConfig() and reused by every ProbeSafeSpawnPosition() call
   /// (each spawn attempt just substitutes a fresh throwaway model name).
@@ -534,6 +727,8 @@ class HumanControlPanel : public gz::gui::Plugin
   signals: void ctrlHeldChanged();
   signals: void sHeldChanged();
   signals: void jHeldChanged();
+  signals: void kHeldChanged();
+  signals: void activeSitLockedChanged();
   signals: void jumpHeightChanged();
   signals: void speedMultiplierChanged();
 };
