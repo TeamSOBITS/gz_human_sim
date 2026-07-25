@@ -352,7 +352,16 @@ class ActorCommandPlugin
       // the clip's own vertical root motion away -- see PoseClip's comment.
       // Ramped with the clip rather than snapped, so the body descends into
       // the pose instead of teleporting down on the first frame.
-      nextPose.Pos().Z(this->CurrentPoseHeightOffset());
+      //
+      // Measured from frozenPose's own Z (the surface the actor was standing
+      // on when the pose began) rather than from an assumed z=0. Now that Z
+      // is read back from physics like X/Y are (see ApplyStandingMotion()),
+      // that surface can be a tabletop or a step, not just the floor -- so
+      // sitting down on something the actor climbed onto lands the hips
+      // relative to THAT, instead of driving them down to floor-relative
+      // seated height and burying the actor in whatever it was standing on.
+      nextPose.Pos().Z(
+          this->frozenPose.Pos().Z() + this->CurrentPoseHeightOffset());
       // The companion physics body (see Configure()'s comment and the
       // collision-body block below) is driven by gz-sim-velocity-control-
       // system, which holds whatever velocity it was last told to use
@@ -647,14 +656,28 @@ class ActorCommandPlugin
     return std::clamp(_elapsed / _seconds, 0.0, 1.0);
   }
 
+  /// \brief Bound, in poseClipTime's own units, for how far the enter clip
+  /// runs -- i.e. just the raw table value. poseClipTime already ticks in
+  /// clip-time (it accumulates dt * poseSpeed, see PreUpdate()), so it can
+  /// be compared directly against kPoseClips[_poseIndex].enterSeconds; NOT
+  /// divided by poseSpeed again here, which used to double-apply the speed
+  /// factor. That bug shrank the real (wall-clock) enter phase by a factor
+  /// of poseSpeed^2 instead of poseSpeed, cutting the sit_down clip off at
+  /// ~1/poseSpeed of the way through (40% at the default 2.5x) while
+  /// CurrentPoseHeightOffset() -- using the same broken bound -- had
+  /// already ramped the hip all the way down. The result was the actor's
+  /// root snapping to fully-seated height while the skeleton was still
+  /// mid-crouch, i.e. exactly the "sitting down looks broken" symptom this
+  /// fixes.
   private: double EnterSeconds(int _poseIndex) const
   {
-    return kPoseClips[_poseIndex].enterSeconds / this->poseSpeed;
+    return kPoseClips[_poseIndex].enterSeconds;
   }
 
+  /// \brief Same fix as EnterSeconds(), for the exit clip.
   private: double ExitSeconds(int _poseIndex) const
   {
-    return kPoseClips[_poseIndex].exitSeconds / this->poseSpeed;
+    return kPoseClips[_poseIndex].exitSeconds;
   }
 
   /// \brief How far below its normal standing height the actor's origin has
@@ -859,7 +882,32 @@ class ActorCommandPlugin
         _distanceTravelled = std::hypot(dx, dy);
       }
     }
-    _nextPose.Pos().Z(this->jumpZ);
+    // Z, for EVERY branch above, comes from the same place X/Y already do:
+    // whatever the physics body actually resolved to. This used to be an
+    // unconditional `_nextPose.Pos().Z(this->jumpZ)` -- i.e. X/Y were read
+    // back from physics while Z was computed independently, from a jump arc
+    // that assumes the actor always lands back on the height it took off
+    // from. Those two sources agree on flat floor and nowhere else, which is
+    // exactly the reported bug: jump onto a table and physics correctly
+    // stops the capsule on the tabletop while jumpZ keeps counting down to
+    // the takeoff height, so the drawn human sinks back to floor level and
+    // the collision volume is left floating above it.
+    //
+    // Reading Z back here instead makes the physics body the single source
+    // of truth for all of X/Y/Z/yaw, so standing on a table, a step, or the
+    // floor are all the same case and none of them need special handling.
+    // No offset arithmetic is involved (and so no double-counting is
+    // possible): the companion's model origin sits at its own feet -- its
+    // link pose 0.85 minus the capsule's 0.85 half-height, see
+    // human_collision_body/model.sdf -- and TrajectoryPose.Z is likewise
+    // measured from the actor's feet, because NormalizeSpawnPose() left the
+    // mesh-origin height on the base Pose component. The two are literally
+    // the same quantity in the same frame.
+    gz::math::Pose3d groundTruthPose;
+    if (this->CollisionBodyPose(_ecm, groundTruthPose))
+      _nextPose.Pos().Z(groundTruthPose.Pos().Z());
+    else
+      _nextPose.Pos().Z(this->jumpZ);
   }
 
   /// \brief Advances the jump arc for this tick. Jump is a Z-only overlay on
@@ -874,6 +922,12 @@ class ActorCommandPlugin
   /// needing to reason about restarting a parabola from a nonzero height.
   /// jumpCount (0 = grounded, 1 = single jump used, 2 = double jump used)
   /// gates JumpCallback() -- see there.
+  ///
+  /// The arc shapes the jump; it does NOT decide when the jump ends. Landing
+  /// is detected off the companion body's real collision result, so the
+  /// actor lands on whatever it actually came down on (floor, table, step)
+  /// rather than on an assumed flat return to takeoff height -- see the
+  /// landing block below.
   ///
   /// Runs BEFORE the movement branches rather than after them (where it used
   /// to live) so that jumpZ is already current for this tick when the
@@ -907,6 +961,39 @@ class ActorCommandPlugin
       return;
     this->jumpVelocityZ -= kGravity * _dt;
     this->jumpZ += this->jumpVelocityZ * _dt;
+
+    // Landing. Only ever checked while descending, so a jump can't "land"
+    // on the way up.
+    if (this->jumpVelocityZ >= 0.0)
+      return;
+    gz::math::Pose3d collisionPose;
+    if (this->CollisionBodyPose(_ecm, collisionPose))
+    {
+      // Physics -- not this arc -- decides where the ground is. The arc
+      // keeps descending past whatever it took off from; the capsule can't,
+      // because a floor/tabletop/step is in the way. So once the body sits
+      // measurably ABOVE where the arc wants it, something solid is holding
+      // it up and that is the landing surface. Rebasing jumpCollisionBaseZ
+      // onto it is what lets the actor end a jump standing on a table
+      // instead of being dragged back down to takeoff height.
+      //
+      // The old test was `jumpZ <= 0.0`, i.e. "have I fallen back to the
+      // height I left from" -- structurally unable to notice a tabletop,
+      // and half of the reported bug (the other half being that the actor's
+      // Z ignored the physics body entirely, see ApplyStandingMotion()).
+      if (collisionPose.Pos().Z() - (this->jumpCollisionBaseZ + this->jumpZ) >
+          kLandingContactTolerance)
+      {
+        this->jumpCollisionBaseZ = collisionPose.Pos().Z();
+        this->jumpZ = 0.0;
+        this->jumpVelocityZ = 0.0;
+        this->jumpCount = 0;
+      }
+      return;
+    }
+    // No companion body to ask (none configured, or still mid-spawn): fall
+    // back to the original flat-ground assumption, which is the best that
+    // can be done without collision information.
     if (this->jumpZ <= 0.0)
     {
       this->jumpZ = 0.0;
@@ -918,23 +1005,58 @@ class ActorCommandPlugin
   /// \brief Vertical velocity to command the collision body with this tick so
   /// it tracks the actor's jump arc.
   ///
-  /// Deliberately a position-error correction ((target - actual) / dt) rather
-  /// than simply echoing jumpVelocityZ: gz-sim-velocity-control-system sets
-  /// the body's velocity outright each step, so any difference between our
-  /// Euler integration and the engine's would otherwise accumulate over the
-  /// arc and leave the capsule hanging a few centimetres off the floor after
-  /// landing. Driving on the error instead makes every tick self-correcting,
-  /// and still leaves contacts free to resolve normally (this is a velocity
-  /// command, not a teleport -- the capsule can still be stopped by a
-  /// ceiling).
+  /// Feed-forward (jumpVelocityZ, the plugin's own Euler-integrated jump
+  /// velocity for this tick) plus a SMALL, CLAMPED correction for whatever
+  /// gap has opened between the capsule's actual Z and the arc's target --
+  /// not a bare (target - actual) / dt term, which is what this used to be.
+  /// That divides the position error by the physics step size, so at a
+  /// typical ~1 ms step it commands 1000x the error as a velocity every
+  /// single tick: a deadbeat controller with effectively infinite gain.
+  /// It only stays stable if the engine reproduces our Euler integration
+  /// exactly, which it doesn't -- this capsule is a real dynamic body with
+  /// gravity and floor contacts of its own, and any tiny mismatch between
+  /// the commanded velocity and what physics actually resolves (contact
+  /// solver iterations, gravity acting the same step, ordinary float
+  /// error) gets amplified by that gain on the very next tick. Over a
+  /// jump's much larger excursion that snowballs into exactly the
+  /// "vibrates and launches itself" behaviour this fixes; it was already
+  /// happening at rest too, just too small (sub-mm gravity sag) to notice.
+  /// Bounding the correction with kJumpCorrectionGain/kJumpCorrectionMax
+  /// keeps it self-correcting (still closes the gap, just over several
+  /// ticks instead of one) without the runaway.
+  ///
+  /// While GROUNDED this instead commands a slow, constant descent
+  /// (kGroundSeekRate) and lets contact stop it, rather than servoing to a
+  /// remembered height. VelocityControl sets the body's velocity outright
+  /// every step, so a real <gravity> can never move this body on its own --
+  /// something has to command the downward motion, and a fixed height
+  /// target would actively hold the capsule hovering in mid-air the moment
+  /// the actor walked off the tabletop it landed on. A gentle downward seek
+  /// is what "gravity" means for a velocity-controlled body: it settles onto
+  /// whatever is underneath, steps down off ledges, and costs nothing while
+  /// already resting on a surface (contact simply cancels it).
   private: double CollisionJumpRate(gz::sim::EntityComponentManager &_ecm,
       double _dt)
   {
     gz::math::Pose3d collisionPose;
     if (_dt <= 0.0 || !this->CollisionBodyPose(_ecm, collisionPose))
       return 0.0;
+    if (this->jumpCount == 0)
+    {
+      // Grounded: seek downward and let physics decide where that stops.
+      // Keeping jumpCollisionBaseZ pinned to where the body actually is
+      // means the next jump launches its arc from the real current surface
+      // (see IntegrateJump()'s `launched` block, which reads the same
+      // value) without this needing to know how the actor got there --
+      // walked down a step, rode a moving surface, or landed on a table.
+      this->jumpCollisionBaseZ = collisionPose.Pos().Z();
+      return -kGroundSeekRate;
+    }
     const double target = this->jumpCollisionBaseZ + this->jumpZ;
-    return (target - collisionPose.Pos().Z()) / _dt;
+    const double error = target - collisionPose.Pos().Z();
+    const double correction = std::clamp(error * kJumpCorrectionGain,
+        -kJumpCorrectionMax, kJumpCorrectionMax);
+    return this->jumpVelocityZ + correction;
   }
 
   /// \brief Lazily resolves and caches the companion collision-body entity
@@ -1137,16 +1259,41 @@ class ActorCommandPlugin
   // the world's <gravity>, since actors are kinematic (TrajectoryPose-
   // driven), not physics-simulated.
   private: static constexpr double kGravity = 9.81;
+  // Bounds for CollisionJumpRate()'s position-error correction term -- see
+  // its own comment for why this is clamped rather than a bare error/dt.
+  private: static constexpr double kJumpCorrectionGain = 10.0;
+  private: static constexpr double kJumpCorrectionMax = 2.0;
+  // How far the descending jump arc has to sink below where the capsule
+  // actually is before IntegrateJump() calls it a landing. Has to clear the
+  // servo's own normal tracking error (millimetres -- the feed-forward term
+  // means there's no steady-state lag to speak of) without being so large
+  // that a landing goes unnoticed for several ticks; 5 cm sits comfortably
+  // between the two.
+  private: static constexpr double kLandingContactTolerance = 0.05;
+  // Downward velocity commanded while grounded so the capsule settles onto
+  // whatever is beneath it -- this package's stand-in for gravity, which
+  // cannot act on a VelocityControl-driven body. See CollisionJumpRate().
+  // Slow on purpose: it only ever has to close contact gaps and walk the
+  // body down off ledges, and a fast descent would let it tunnel a step
+  // deeper into a surface before the contact solver catches it.
+  private: static constexpr double kGroundSeekRate = 0.8;
   private: bool jumpRequested{false};
+  // Height of the jump arc ABOVE jumpCollisionBaseZ (the surface it launched
+  // from) -- not the actor's world Z, which is read back from the physics
+  // body instead. jumpZ only reaches the actor directly as the fallback for
+  // when there is no companion body to read. See ApplyStandingMotion().
   private: double jumpZ{0.0};
   private: double jumpVelocityZ{0.0};
   // 0 = grounded, 1 = single jump in progress, 2 = double jump used --
   // see JumpCallback()/the PreUpdate() jump block.
   private: int jumpCount{0};
   private: double jumpHeightParam{1.0};
-  // World Z the collision body was resting at when the current jump left the
-  // ground -- the arc is measured from there, not from an assumed z=0, so
-  // jumping off a step lands back on the step. See IntegrateJump().
+  // World Z of the surface the actor is standing on: continuously tracked
+  // from the collision body while grounded, frozen at the takeoff surface
+  // for the duration of a jump, and re-pinned to the landing surface the
+  // moment contact is detected. The arc is measured from this rather than
+  // from an assumed z=0, which is what lets a jump start and finish on a
+  // table or a step. See CollisionJumpRate()/IntegrateJump().
   private: double jumpCollisionBaseZ{0.0};
   private: std::chrono::steady_clock::duration animationTime{
       std::chrono::steady_clock::duration::zero()};
@@ -1172,8 +1319,9 @@ class ActorCommandPlugin
   private: int activePoseIndex{-1};
   private: double activeSupportHeight{0.0};
   // Seconds into the current enter/hold/exit clip, already scaled by
-  // poseSpeed (so it's compared directly against EnterSeconds()/
-  // ExitSeconds(), not against the table's raw clip lengths).
+  // poseSpeed -- i.e. this ticks in clip-time, the same units as the
+  // table's raw clip lengths, so it's compared directly against
+  // EnterSeconds()/ExitSeconds() (which just return those raw lengths).
   private: double poseClipTime{0.0};
   private: double poseSpeed{2.5};
   private: gz::math::Pose3d frozenPose{gz::math::Pose3d::Zero};

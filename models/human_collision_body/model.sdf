@@ -38,6 +38,21 @@
            hemispherical caps), centered at half its own height so its
            base sits on the ground plane like the actor models do. -->
       <pose>0 0 0.85 0 0 0</pose>
+      <!-- Gravity is off because it cannot do anything useful here and
+           actively fights the controller. The VelocityControl plugin below
+           SETS this body's velocity outright every step, so an accumulating
+           gravitational velocity is overwritten before it can ever move the
+           body -- gravity's only remaining effect was a sub-step sag into
+           the floor that the same controller then had to correct back out
+           every tick, feeding the oscillation that made the capsule
+           vibrate and fly off during a jump.
+           ActorCommandPlugin::CollisionJumpRate() supplies the vertical
+           motion instead, including a constant downward "seek" while
+           grounded that plays gravity's role properly for a
+           velocity-controlled body: it settles the capsule onto whatever is
+           beneath it and walks it down off ledges, at a speed the contact
+           solver can actually stop. -->
+      <gravity>false</gravity>
       <!-- Ixx/Iyy (resistance to toppling/rolling) are set absurdly high
            on purpose, nowhere near a real human's ~17.87 -- confirmed by
            direct testing that a physically-realistic value lets a single

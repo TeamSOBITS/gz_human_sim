@@ -211,7 +211,7 @@ class HumanControlPanel : public gz::gui::Plugin
   /// it out from under a row that isn't "対象" right now).
   public: Q_INVOKABLE bool showCollisionAt(int _index) const;
 
-  /// \brief Show/hide _index's collision-body debug capsule (shown by
+  /// \brief Show/hide _index's collision-body debug capsule (hidden by
   /// default) -- actually applied on the render thread by
   /// ApplyCollisionVisibility(), not here. No-op for non-actor humans (no
   /// collision-body companion to show).
@@ -388,18 +388,20 @@ class HumanControlPanel : public gz::gui::Plugin
     // state (setShowCollision()/setShowCollisionAll()); the other two are
     // ApplyCollisionVisibility()'s own render-thread bookkeeping.
     //
-    // Defaults to shown: the capsule exists to be looked at (that's the
-    // whole point of giving human_collision_body a <visual> at all), and
-    // starting shown also means the SDF's own appearance is already
-    // correct on frame one, with nothing to re-apply before the first
-    // toggle.
+    // Defaults to hidden: the capsule is a debug aid (see
+    // human_collision_body/model.sdf's own comment), not something a user
+    // driving/watching a human normally wants cluttering the view, so it
+    // starts off and has to be opted into per row (or via "all") from the
+    // panel. appliedShowCollision still starts at the tri-state "nothing
+    // applied yet" below, so this hidden state is explicitly pushed to the
+    // freshly-spawned collision body on frame one rather than assumed.
     //
     // appliedShowCollision is deliberately a tri-state int (-1 = nothing
     // applied yet) rather than a bool, so a freshly (re)spawned
     // collision body always gets the current state pushed to it even when
     // that state happens to equal the previous one -- see
     // applyCollisionSize(), which resets it.
-    bool showCollision{true};
+    bool showCollision{false};
     int appliedShowCollision{-1};
     int collisionVisualRetries{0};
     // Current capsule dimensions, updated by applyCollisionSize() -- kept
