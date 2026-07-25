@@ -199,10 +199,10 @@ class HumanControlPanel : public gz::gui::Plugin
   /// it out from under a row that isn't "対象" right now).
   public: Q_INVOKABLE bool showCollisionAt(int _index) const;
 
-  /// \brief Toggle _index's collision-body debug capsule between hidden
-  /// (translucent, the default) and shown (clearly colored) -- actually
-  /// applied on the render thread by ApplyCollisionVisibility(), not here.
-  /// No-op for non-actor humans (no collision-body companion to show).
+  /// \brief Show/hide _index's collision-body debug capsule (shown by
+  /// default) -- actually applied on the render thread by
+  /// ApplyCollisionVisibility(), not here. No-op for non-actor humans (no
+  /// collision-body companion to show).
   public: Q_INVOKABLE void setShowCollision(int _index, bool _value);
 
   /// \brief setShowCollision() for every currently-spawned human at once.
@@ -373,15 +373,22 @@ class HumanControlPanel : public gz::gui::Plugin
     // model.sdf's translucent capsule) -- only meaningful for actor-backed
     // humans, same as velocityPublisher above (checked the same way:
     // velocityPublisher.Valid()). showCollision is the desired on/off
-    // state (setShowCollision()/setShowCollisionAll()); collisionMaterial/
-    // appliedCollisionTransparency/collisionVisualRetries are
-    // ApplyCollisionVisibility()'s own render-thread bookkeeping once it
-    // finds and clones this human's collision-body visual material (a
-    // clone so mutating transparency doesn't affect any other visual that
-    // happens to share the same underlying material instance).
-    bool showCollision{false};
-    gz::rendering::MaterialPtr collisionMaterial;
-    float appliedCollisionTransparency{-1.0f};
+    // state (setShowCollision()/setShowCollisionAll()); the other two are
+    // ApplyCollisionVisibility()'s own render-thread bookkeeping.
+    //
+    // Defaults to shown: the capsule exists to be looked at (that's the
+    // whole point of giving human_collision_body a <visual> at all), and
+    // starting shown also means the SDF's own appearance is already
+    // correct on frame one, with nothing to re-apply before the first
+    // toggle.
+    //
+    // appliedShowCollision is deliberately a tri-state int (-1 = nothing
+    // applied yet) rather than a bool, so a freshly (re)spawned
+    // collision body always gets the current state pushed to it even when
+    // that state happens to equal the previous one -- see
+    // applyCollisionSize(), which resets it.
+    bool showCollision{true};
+    int appliedShowCollision{-1};
     int collisionVisualRetries{0};
     // Current capsule dimensions, updated by applyCollisionSize() -- kept
     // here so the QML size sliders can read back what's actually applied
@@ -541,29 +548,37 @@ class HumanControlPanel : public gz::gui::Plugin
   private: void ApplyViewpoint();
 
   /// \brief Render-thread only, called from the same eventFilter() Render
-  /// branch as ApplyViewpoint(): for every actor-backed human, finds its
-  /// collision-body companion's Visual in the render scene (retrying
-  /// while it's still spawning, same idea as ApplyViewpoint()'s target
-  /// search), clones its material once, and keeps that material's
-  /// transparency in sync with Human::showCollision. Writing
-  /// components::Transparency on the ECM side was considered and rejected
-  /// -- confirmed (by reading gz-sim's own RenderUtil.cc/SceneManager.cc)
-  /// that it's only ever read once, at the moment a Visual entity is
-  /// first created, not watched for changes afterward.
+  /// branch as ApplyViewpoint(): pushes each actor-backed human's
+  /// Human::showCollision to its collision-body capsule in the render
+  /// scene, retrying while the companion model is still spawning (same
+  /// idea as ApplyViewpoint()'s target search). Does nothing on a human
+  /// whose state is already applied, so the per-frame cost is a couple of
+  /// int comparisons in the steady state.
+  ///
+  /// Writing components::Transparency on the ECM side was considered and
+  /// rejected -- confirmed (by reading gz-sim's own RenderUtil.cc/
+  /// SceneManager.cc) that it's only ever read once, at the moment a
+  /// Visual entity is first created, not watched for changes afterward.
   private: void ApplyCollisionVisibility();
 
-  /// \brief Finds the render-scene Visual that actually carries the named
-  /// collision-body model's capsule geometry (the one with a non-null
-  /// Material() -- see ApplyCollisionVisibility()). Tries an exact
-  /// scene->VisualByName(_modelName) first (the same lookup ApplyViewpoint()
-  /// already relies on for model-level nodes), falling back to an "id::"-
-  /// scoped suffix match for the same reason ApplyViewpoint() needs one;
-  /// either way this only ever lands on the model's own top-level node, so
-  /// it then recurses through children (link, then visual) looking for the
-  /// first one with its own geometry/material rather than assuming a fixed
-  /// "<model>::<link>::visual" depth.
-  private: gz::rendering::VisualPtr FindCollisionCapsuleVisual(
-      const gz::rendering::ScenePtr &_scene, const std::string &_modelName) const;
+  /// \brief Shows/hides the named collision-body model in the render
+  /// scene, returning false if the scene has no visual for it (yet).
+  ///
+  /// Toggles Visual::SetVisible() rather than dimming a cloned material's
+  /// transparency, which is what this used to do and what never actually
+  /// worked: it required the model's capsule Visual to carry a non-null
+  /// Material() of its own, and gz-sim's SceneManager hangs the material
+  /// off the Geometry instead, so the search always came up empty and the
+  /// button silently did nothing. Visibility needs no material at all, and
+  /// "hidden" means genuinely gone rather than very faint.
+  ///
+  /// Applies to every visual belonging to the model -- its own top-level
+  /// node plus each descendant -- instead of betting on one particular
+  /// level of gz-sim's "<model>::<link>::<visual>" scoped naming being the
+  /// one that matters. Setting it on all of them is idempotent, and means
+  /// this keeps working whichever level the geometry actually hangs from.
+  private: bool SetCollisionBodyVisible(const gz::rendering::ScenePtr &_scene,
+      const std::string &_modelName, bool _visible) const;
 
   /// \brief Key-down handler for W/A/D/X: adds _direction to
   /// heldDirectionKeys (capped at 2 -- a 3rd simultaneous press is

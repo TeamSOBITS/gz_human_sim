@@ -276,24 +276,24 @@ Rectangle {
             }
           }
 
-          // 当たり判定カプセルの表示切替え（人物ごと）。実際の透明度変更は
+          // 当たり判定カプセルの表示切替え（人物ごと）。実際の表示/非表示は
           // HumanControlPanel::ApplyCollisionVisibility()がRenderイベントで
           // 行う -- humansChanged()発火（setShowCollision()/
           // setShowCollisionAll()の両方が発火させる）のたびにここで再同期する。
           // チェックボックスではなくボタン: クリックのたびに表示⇔非表示を
           // 切り替え、ボタンラベル自体が現在の状態を示す。
+          //
+          // shownはC++側(showCollisionAt())の写しであって独立した状態では
+          // ない。クリック時に自前でトグルせずsetShowCollision()を呼んで
+          // からhumansChanged()経由で読み直すのは、「全員表示にする」など
+          // 他の経路でC++側が変わったときにボタンの表示がずれないように
+          // するため（表示中なのにラベルが「表示」のまま、を防ぐ）。
           Button {
             id: collisionToggleButton
-            property bool shown: false
+            property bool shown: HumanControlPanel.showCollisionAt(humanRow.humanIndex)
             visible: HumanControlPanel.isHumanActorAt(humanRow.humanIndex)
             text: shown ? "当たり判定を非表示" : "当たり判定を表示"
-            Component.onCompleted: {
-              shown = HumanControlPanel.showCollisionAt(humanRow.humanIndex)
-            }
-            onClicked: {
-              shown = !shown
-              HumanControlPanel.setShowCollision(humanRow.humanIndex, shown)
-            }
+            onClicked: HumanControlPanel.setShowCollision(humanRow.humanIndex, !shown)
             Connections {
               target: HumanControlPanel
               function onHumansChanged() {
@@ -567,15 +567,30 @@ Rectangle {
       spacing: 8
       Label { text: "表示"; color: "#536b67" }
       // 表示/非表示を1つのボタンで切り替える（個別行と同じ「ラベルが現在の
-      // 状態を示すトグルボタン」方式）。全員の状態が揃っていない場合も
-      // 単に次にどちらへ切り替えるかだけを示す。
+      // 状態を示すトグルボタン」方式）。ここは全員分をまとめて操作するので、
+      // 状態が揃っていないとき（誰かだけ非表示）は「全員表示にする」を出す
+      // ―― まず全員を揃える方が、押した結果が読みやすい。
       Button {
         id: collisionAllToggleButton
         property bool allShown: false
+        function resync() {
+          var any = false
+          var all = true
+          for (var i = 0; i < HumanControlPanel.humanList.length; ++i) {
+            if (!HumanControlPanel.isHumanActorAt(i))
+              continue
+            any = true
+            if (!HumanControlPanel.showCollisionAt(i))
+              all = false
+          }
+          allShown = any && all
+        }
+        Component.onCompleted: resync()
         text: allShown ? "全員非表示にする" : "全員表示にする"
-        onClicked: {
-          allShown = !allShown
-          HumanControlPanel.setShowCollisionAll(allShown)
+        onClicked: HumanControlPanel.setShowCollisionAll(!allShown)
+        Connections {
+          target: HumanControlPanel
+          function onHumansChanged() { collisionAllToggleButton.resync() }
         }
       }
     }

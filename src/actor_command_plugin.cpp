@@ -21,6 +21,7 @@
 #include <gz/sim/components/Actor.hh>
 #include <gz/sim/components/Name.hh>
 #include <gz/sim/components/Pose.hh>
+#include <gz/sim/components/PoseCmd.hh>
 #include <gz/transport/Node.hh>
 #include <sdf/Element.hh>
 
@@ -98,36 +99,6 @@ class ActorCommandPlugin
       _ecm.CreateComponent(this->entity,
           gz::sim::components::AnimationTime(this->animationTime));
 
-    // The actor's spawn pose (from `ros_gz_sim create -x/-y/-z/-Y`) lands in
-    // the base Pose component. Without this block, TrajectoryPose used to
-    // start at literal (0,0,0,yaw=0) on the first PreUpdate() tick
-    // regardless of where/how the actor was actually spawned. That yaw
-    // mismatch is the real-world impact: PreUpdate() reads its current
-    // facing via trajectoryPose->Data().Rot().Yaw(), so a rotated spawn
-    // (`-Y` != 0) would compute its very first velocity step using yaw=0
-    // instead of the actor's real facing, sending it off in the wrong
-    // direction until its internally-tracked yaw caught up. Seeding
-    // TrajectoryPose with the actual spawn pose fixes that from tick one.
-    // X/Y are then zeroed on the base Pose so the spawn offset isn't also
-    // counted a second time underneath the TrajectoryPose offset. Z stays
-    // on the base Pose (it encodes the model's static height correction,
-    // e.g. walking_actor's mesh offset) and is zeroed on the TrajectoryPose
-    // side instead, since PreUpdate() never changes Z.
-    //
-    // Ported from gz_human_sim's own develop/yk branch (which fixed this
-    // independently of gazebo-ros-actor-plugin -- that plugin's
-    // Configure() does the same base-Pose/TrajectoryPose seeding, for the
-    // same reason).
-    auto poseComponent = _ecm.Component<gz::sim::components::Pose>(this->entity);
-    gz::math::Pose3d initialPose = gz::math::Pose3d::Zero;
-    if (poseComponent != nullptr)
-    {
-      initialPose = poseComponent->Data();
-      gz::math::Pose3d basePose = initialPose;
-      basePose.Pos().X(0.0);
-      basePose.Pos().Y(0.0);
-      *poseComponent = gz::sim::components::Pose(basePose);
-    }
     // Create TrajectoryPose here rather than lazily in PreUpdate: PreUpdate
     // returns immediately while the world is paused (e.g. a launch file
     // that doesn't pass `-r`), which would otherwise leave this actor with
@@ -135,12 +106,21 @@ class ActorCommandPlugin
     // thread assumes actors with animation components also have a
     // TrajectoryPose, and segfaults in RenderUtil::UpdateAnimation when
     // that assumption doesn't hold.
+    //
+    // Seeded at identity, NOT at the spawn pose: at Configure() time the
+    // base Pose component still holds the actor's own model.sdf <pose>,
+    // because gz-sim's UserCommands create path applies the requested
+    // `-x/-y/-z/-Y` spawn pose only AFTER an entity's system plugins have
+    // been configured (verified directly on gz-sim 8: Configure() reads
+    // walking_actor's own `0 0 0.86`, and the first PreUpdate() tick then
+    // sees the real spawn pose). Splitting the spawn pose between the base
+    // Pose and TrajectoryPose therefore cannot happen here -- see
+    // NormalizeSpawnPose(), which does it on the first PreUpdate() tick
+    // instead, and its comment for what goes wrong when it isn't done.
     if (_ecm.Component<gz::sim::components::TrajectoryPose>(this->entity) == nullptr)
     {
-      gz::math::Pose3d initialTrajectoryPose = initialPose;
-      initialTrajectoryPose.Pos().Z(0.0);
       _ecm.CreateComponent(this->entity,
-          gz::sim::components::TrajectoryPose(initialTrajectoryPose));
+          gz::sim::components::TrajectoryPose(gz::math::Pose3d::Zero));
     }
 
     if (!this->transportNode.Subscribe(this->velocityTopic,
@@ -193,6 +173,11 @@ class ActorCommandPlugin
         return;
       }
     }
+    // Before the paused check on purpose: this only rearranges which
+    // component the actor's spawn pose is stored in, without moving it, so
+    // it's safe (and desirable) to have the invariant established even in a
+    // world that starts paused.
+    this->NormalizeSpawnPose(_ecm);
     if (_info.paused)
       return;
     const double dt = std::chrono::duration<double>(_info.dt).count();
@@ -303,11 +288,7 @@ class ActorCommandPlugin
       // below). Explicitly pinning it to zero here, every tick, is what
       // keeps it (and therefore the actor, once movement resumes) actually
       // parked at frozenPose for the whole sit.
-      if (this->collisionPublisher.Valid())
-      {
-        gz::msgs::Twist stopTwist;
-        this->collisionPublisher.Publish(stopTwist);
-      }
+      this->DriveCollisionBody(_ecm, gz::msgs::Twist(), nullptr);
       // Jump requests received while sitting would otherwise sit in
       // jumpRequested (only consumed by the jump block inside the Standing
       // branch below) and fire as a surprise jump the instant the actor
@@ -321,21 +302,6 @@ class ActorCommandPlugin
     {
       this->ApplyStandingMotion(_ecm, currentPose, nextPose, dt, distanceTravelled);
     }
-
-    // Unconditional, every tick, regardless of how nextPose was just
-    // decided (sitting-frozen above, or velocity/path inside
-    // ApplyStandingMotion): hard-pins the collision-body companion's
-    // rendered position to the actor's own final pose, rather than
-    // trusting whatever the physics engine itself settled on. The
-    // velocity branch above still reads the companion's physics-resolved
-    // pose FIRST (so walls/furniture still block it the same as before) --
-    // this just removes any residual drift (contact jitter, momentum
-    // carryover, gravity/friction settling, PreUpdate-vs-Physics tick
-    // ordering) between that read and what actually renders, which is
-    // what made the debug capsule (当たり判定表示) visibly lag/drift away
-    // from the actor during teleop. See SyncCollisionBodyPose()'s own
-    // comment.
-    this->SyncCollisionBodyPose(_ecm, nextPose);
 
     *trajectoryPose = gz::sim::components::TrajectoryPose(nextPose);
     _ecm.SetChanged(this->entity, gz::sim::components::TrajectoryPose::typeId,
@@ -419,6 +385,61 @@ class ActorCommandPlugin
             gz::sim::ComponentState::OneTimeChange);
       }
     }
+  }
+
+  /// \brief One-shot, on the first PreUpdate() tick: moves the actor's
+  /// spawn X/Y/yaw out of its base Pose component and into TrajectoryPose,
+  /// leaving the base Pose as nothing but the model's static standing
+  /// height (0, 0, z, no rotation).
+  ///
+  /// gz-sim renders an actor at `TrajectoryPose ⊕ Pose` -- i.e. the base
+  /// Pose is a frame the TrajectoryPose is expressed IN, not an alternative
+  /// to it (gz-sim's RenderUtil.cc composes the two). This plugin drives
+  /// TrajectoryPose with absolute world coordinates (read straight off the
+  /// collision body's physics-resolved world pose, see
+  /// ApplyStandingMotion()), so unless the base Pose is neutralised first,
+  /// every actor renders at spawnPose ⊕ worldPose instead of worldPose:
+  /// displaced by its own spawn offset and turned by twice its spawn yaw.
+  /// That is exactly the "the collision capsule stops at the wall but the
+  /// human model keeps going and ends up inside the furniture" symptom --
+  /// the physics and the read-back were right all along, only the drawn
+  /// mesh was off by the spawn position.
+  ///
+  /// Has to happen here rather than in Configure() because Configure() runs
+  /// before gz-sim applies the create-service spawn pose -- see the comment
+  /// on the TrajectoryPose creation there.
+  private: void NormalizeSpawnPose(gz::sim::EntityComponentManager &_ecm)
+  {
+    if (this->spawnPoseNormalized)
+      return;
+    auto poseComponent = _ecm.Component<gz::sim::components::Pose>(this->entity);
+    auto trajectoryPose = _ecm.Component<gz::sim::components::TrajectoryPose>(
+        this->entity);
+    if (poseComponent == nullptr || trajectoryPose == nullptr)
+      return;
+    this->spawnPoseNormalized = true;
+
+    const gz::math::Pose3d spawnPose = poseComponent->Data();
+    // Z is the one component that stays on the base Pose: it encodes the
+    // model's static height correction (walking_actor's mesh origin sits
+    // ~0.86 m above its feet, DoctorFemaleWalk's sits at ground level), and
+    // PreUpdate() only ever writes Z on TrajectoryPose as the jump arc's
+    // offset on top of it.
+    gz::math::Pose3d basePose = gz::math::Pose3d::Zero;
+    basePose.Pos().Z(spawnPose.Pos().Z());
+    *poseComponent = gz::sim::components::Pose(basePose);
+    _ecm.SetChanged(this->entity, gz::sim::components::Pose::typeId,
+        gz::sim::ComponentState::OneTimeChange);
+
+    // Seeding the yaw (not just X/Y) matters from tick one: PreUpdate()
+    // reads the actor's current facing back out of TrajectoryPose, so an
+    // actor spawned with `-Y != 0` would otherwise compute its very first
+    // velocity step as if it were facing +X.
+    *trajectoryPose = gz::sim::components::TrajectoryPose(
+        gz::math::Pose3d(spawnPose.Pos().X(), spawnPose.Pos().Y(), 0.0,
+            0.0, 0.0, spawnPose.Rot().Yaw()));
+    _ecm.SetChanged(this->entity, gz::sim::components::TrajectoryPose::typeId,
+        gz::sim::ComponentState::OneTimeChange);
   }
 
   private: void VelocityCallback(const gz::msgs::Twist &_message)
@@ -530,7 +551,7 @@ class ActorCommandPlugin
   }
 
   /// \brief Normal (non-sitting) movement: path/velocity command source
-  /// selection, the collision-body sync, and the jump Z-overlay -- exactly
+  /// selection, the collision-body command, and the jump Z-overlay -- exactly
   /// what PreUpdate() always did before the sit state machine existed,
   /// just pulled out into its own method (a) so PreUpdate() itself reads
   /// as "sitting freeze, or else normal motion" instead of a page of
@@ -559,7 +580,24 @@ class ActorCommandPlugin
     bool pathApplied = false;
     if (followMode != "velocity")
       pathApplied = this->ApplyPathCommand(_nextPose, _dt, _distanceTravelled);
-    if (!pathApplied && followMode != "path")
+    if (pathApplied)
+    {
+      // Path following integrates waypoints open-loop -- the companion body
+      // isn't what's driving here, so drag it along to the actor instead of
+      // leaving it behind. Without this the capsule keeps coasting on
+      // whatever velocity it was last given (gz-sim-velocity-control-system
+      // holds the last command indefinitely) and drifts away from the human
+      // for as long as the path runs.
+      this->DriveCollisionBody(_ecm, gz::msgs::Twist(), &_nextPose);
+    }
+    else if (followMode == "path")
+    {
+      // follow_mode "path" with no path currently active: the actor stands
+      // still, so the companion has to be told to stand still too -- same
+      // "VelocityControl holds its last command forever" reason as above.
+      this->DriveCollisionBody(_ecm, gz::msgs::Twist(), nullptr);
+    }
+    else
     {
       const double yaw = _currentPose.Rot().Yaw();
       double bodyLinear = this->velocity.linear;
@@ -609,14 +647,14 @@ class ActorCommandPlugin
         // walking through them. Resolved lazily/every tick until found,
         // since the companion model may still be mid-spawn for the first
         // few ticks after this actor's own Configure() runs.
-        if (this->collisionPublisher.Valid())
-        {
-          gz::msgs::Twist collisionTwist;
-          collisionTwist.mutable_linear()->set_x(bodyLinear);
-          collisionTwist.mutable_linear()->set_y(bodyLateral);
-          collisionTwist.mutable_angular()->set_z(bodyAngularRate);
-          this->collisionPublisher.Publish(collisionTwist);
-        }
+        gz::msgs::Twist collisionTwist;
+        collisionTwist.mutable_linear()->set_x(bodyLinear);
+        collisionTwist.mutable_linear()->set_y(bodyLateral);
+        collisionTwist.mutable_angular()->set_z(bodyAngularRate);
+        // No teleport here on purpose (see DriveCollisionBody()): this is
+        // the branch where the physics body -- not the actor -- decides
+        // where the human ends up.
+        this->DriveCollisionBody(_ecm, collisionTwist, nullptr);
         const gz::sim::Entity resolvedCollisionEntity =
             this->ResolveCollisionEntity(_ecm);
         if (resolvedCollisionEntity != gz::sim::kNullEntity)
@@ -763,16 +801,31 @@ class ActorCommandPlugin
     return true;
   }
 
-  /// \brief Teleports the collision-body companion (see
-  /// ResolveCollisionEntity()) to _pose's X/Y/yaw. Only X/Y/yaw move --
-  /// the companion's own Z stays whatever its model.sdf spawned it at
-  /// (its <link> pose already bakes in standing height from a
-  /// ground-level model root, independent of the actor's own Z -- same
-  /// reasoning as spawn_human.launch.py's collision-body spawn always
-  /// using z=0.0 regardless of the actor's spawn z).
-  private: void SyncCollisionBodyPose(gz::sim::EntityComponentManager &_ecm,
-      const gz::math::Pose3d &_pose)
+  /// \brief Sends the companion collision body (see
+  /// ResolveCollisionEntity()) its command for this tick: always the
+  /// body-frame Twist gz-sim-velocity-control-system integrates, plus --
+  /// only when _teleportTo is non-null -- a hard world-pose teleport on top
+  /// of it.
+  ///
+  /// The teleport goes through components::WorldPoseCmd, the only pose
+  /// channel gz-sim's Physics system actually consumes for a dynamic model.
+  /// An earlier version of this wrote components::Pose directly, which has
+  /// no effect whatsoever: Physics recomputes that component from the
+  /// engine's own result later in the same iteration, so the write was
+  /// silently discarded every single tick.
+  ///
+  /// Teleporting is only ever right where the ACTOR, not the physics body,
+  /// is deciding where to be (path following, or standing still). The
+  /// teleop branch in ApplyStandingMotion() deliberately does not teleport
+  /// -- it reads the body's physics-resolved pose back instead, which is
+  /// exactly what lets walls and furniture stop it.
+  private: void DriveCollisionBody(gz::sim::EntityComponentManager &_ecm,
+      const gz::msgs::Twist &_twist, const gz::math::Pose3d *_teleportTo)
   {
+    if (this->collisionPublisher.Valid())
+      this->collisionPublisher.Publish(_twist);
+    if (_teleportTo == nullptr)
+      return;
     const gz::sim::Entity resolvedCollisionEntity = this->ResolveCollisionEntity(_ecm);
     if (resolvedCollisionEntity == gz::sim::kNullEntity)
       return;
@@ -787,13 +840,17 @@ class ActorCommandPlugin
       this->collisionEntity = gz::sim::kNullEntity;
       return;
     }
-    gz::math::Pose3d newPose = collisionPose->Data();
-    newPose.Pos().X(_pose.Pos().X());
-    newPose.Pos().Y(_pose.Pos().Y());
-    newPose.Rot() = gz::math::Quaterniond(0.0, 0.0, _pose.Rot().Yaw());
-    *collisionPose = gz::sim::components::Pose(newPose);
-    _ecm.SetChanged(resolvedCollisionEntity, gz::sim::components::Pose::typeId,
-        gz::sim::ComponentState::OneTimeChange);
+    // Only X/Y/yaw move -- the companion's own Z stays whatever its
+    // model.sdf spawned it at (its <link> pose already bakes in standing
+    // height from a ground-level model root, independent of the actor's own
+    // Z -- same reasoning as spawn_human.launch.py's collision-body spawn
+    // always using z=0.0 regardless of the actor's spawn z).
+    gz::math::Pose3d target = collisionPose->Data();
+    target.Pos().X(_teleportTo->Pos().X());
+    target.Pos().Y(_teleportTo->Pos().Y());
+    target.Rot() = gz::math::Quaterniond(0.0, 0.0, _teleportTo->Rot().Yaw());
+    _ecm.SetComponentData<gz::sim::components::WorldPoseCmd>(
+        resolvedCollisionEntity, target);
   }
 
   /// \brief One parsed cmd_vel command. turnToFace selects which of the
@@ -812,6 +869,8 @@ class ActorCommandPlugin
   };
 
   private: gz::sim::Entity entity{gz::sim::kNullEntity};
+  // One-shot latch for NormalizeSpawnPose() -- see there.
+  private: bool spawnPoseNormalized{false};
   private: gz::transport::Node transportNode;
   private: std::mutex commandMutex;
   private: std::queue<VelocityCommand> velocityCommands;

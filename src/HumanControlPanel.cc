@@ -129,14 +129,6 @@ static constexpr int kEntityPollIntervalMs = 500;
 static constexpr int kEntityPollMaxAttempts = 20;
 static constexpr unsigned int kStateQueryTimeoutMs = 800u;
 
-// ApplyCollisionVisibility(): transparency values (0 = opaque, 1 = fully
-// transparent, see gz::rendering::Material::SetTransparency()) for the
-// collision-body debug capsule's two states. Hidden isn't 1.0 outright --
-// slightly short of fully invisible reads as more intentional ("this is
-// dimmed") than a value that could be mistaken for the visual having
-// failed to apply at all.
-static constexpr float kCollisionHiddenTransparency = 0.9f;
-static constexpr float kCollisionVisibleTransparency = 0.25f;
 // Same idea as kSpawnSafetyMaxAttempts's 8-attempt cap, but per-frame
 // instead of per-spawn-attempt: gives up searching the render scene for a
 // human's collision-body visual after this many failed Render-event
@@ -922,11 +914,15 @@ void HumanControlPanel::setShowCollision(int _index, bool _value)
   if (!human.velocityPublisher.Valid())
     return;
   human.showCollision = _value;
+  // A previous search that ran out of retries (kCollisionVisualMaxRetries)
+  // must not make this human's button dead forever -- an explicit toggle
+  // is exactly the moment to start looking again.
+  human.collisionVisualRetries = 0;
   // ApplyCollisionVisibility() (render thread, driven off Render events)
   // picks this up and applies it next frame -- see its own comment for
   // why this can't just be done synchronously here. humansChanged() lets
-  // every row's QML checkbox (not just this one, e.g. after
-  // setShowCollisionAll()) resync its displayed checked state.
+  // every row's QML button (not just this one, e.g. after
+  // setShowCollisionAll()) resync its displayed state.
   this->humansChanged();
 }
 
@@ -935,7 +931,10 @@ void HumanControlPanel::setShowCollisionAll(bool _value)
   for (auto &human : this->humans)
   {
     if (human.velocityPublisher.Valid())
+    {
       human.showCollision = _value;
+      human.collisionVisualRetries = 0;
+    }
   }
   this->humansChanged();
 }
@@ -1022,11 +1021,11 @@ void HumanControlPanel::applyCollisionSize(int _index, double _radius, double _l
     sdf.replace(pos, lengthPlaceholder.size(), newLength);
 
   this->RequestEntityRemoval(collisionModelName);
-  // The old cached material belongs to the entity that's about to be
-  // destroyed -- ApplyCollisionVisibility() re-finds and re-clones a
-  // fresh one for the new entity once it appears.
-  human.collisionMaterial.reset();
-  human.appliedCollisionTransparency = -1.0f;
+  // The replacement model brings brand-new scene visuals with it, which
+  // start out visible regardless of what this human's toggle says -- reset
+  // to "nothing applied yet" so ApplyCollisionVisibility() pushes the
+  // current state onto them once they appear.
+  human.appliedShowCollision = -1;
   human.collisionVisualRetries = 0;
   human.collisionRadius = _radius;
   human.collisionLength = _length;
@@ -2170,61 +2169,39 @@ void HumanControlPanel::ApplyViewpoint()
   this->SetStatus(command.label);
 }
 
-gz::rendering::VisualPtr HumanControlPanel::FindCollisionCapsuleVisual(
-    const gz::rendering::ScenePtr &_scene, const std::string &_modelName) const
+bool HumanControlPanel::SetCollisionBodyVisible(
+    const gz::rendering::ScenePtr &_scene, const std::string &_modelName,
+    bool _visible) const
 {
-  // Exact lookup first -- the same one ApplyViewpoint() already relies on
-  // successfully for model-level nodes -- then the same "id::"-scoped
-  // suffix fallback it uses for the same reason.
-  gz::rendering::VisualPtr modelVisual = _scene->VisualByName(_modelName);
-  if (!modelVisual)
+  // gz-sim's SceneManager names a model's visuals with "::"-scoped paths
+  // ("<model>", "<model>::<link>", "<model>::<link>::<visual>", sometimes
+  // with a further scope prefix in front). Match all three shapes rather
+  // than any one of them, and apply to every hit -- see the header for why
+  // picking a single "the" visual is what broke this before.
+  const std::string prefix = _modelName + "::";
+  const std::string suffix = "::" + _modelName;
+  bool found = false;
+  for (unsigned int i = 0; i < _scene->VisualCount(); ++i)
   {
-    const std::string suffix = "::" + _modelName;
-    for (unsigned int i = 0; i < _scene->VisualCount(); ++i)
-    {
-      auto visual = _scene->VisualByIndex(i);
-      if (!visual)
-        continue;
-      const std::string &name = visual->Name();
-      if (name.size() >= suffix.size() &&
-          name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
-      {
-        modelVisual = visual;
-        break;
-      }
-    }
+    auto visual = _scene->VisualByIndex(i);
+    if (!visual)
+      continue;
+    const std::string &name = visual->Name();
+    const bool exact = name == _modelName;
+    const bool scopedChild = name.compare(0, prefix.size(), prefix) == 0;
+    const bool scopedSelf = name.size() > suffix.size() &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+    // A scoped parent ("world::human1_collision") also has scoped children
+    // ("world::human1_collision::body"), which neither of the two checks
+    // above catches -- hence the plain containment test for that one case.
+    const bool scopedDescendant =
+        name.find(suffix + "::") != std::string::npos;
+    if (!exact && !scopedChild && !scopedSelf && !scopedDescendant)
+      continue;
+    visual->SetVisible(_visible);
+    found = true;
   }
-  if (!modelVisual)
-    return nullptr;
-
-  // modelVisual is the model's own top-level node -- it has no geometry
-  // of its own, the capsule geometry/material live on a Visual some
-  // number of levels below it (link, then visual). Recurse instead of
-  // assuming a fixed depth, since that fixed-depth assumption ("<model
-  // name>_collision::" as a plain substring, matching against a supposed
-  // "<model>::<link>::visual" name) is what silently never matched
-  // anything before this -- 当たり判定表示 doing nothing, and the capsule
-  // staying stuck at model.sdf's own baked-in 0.55 transparency (visible
-  // by default) instead of the 0.9 "hidden" state ApplyCollisionVisibility()
-  // was supposed to apply from tick one, both trace back to this search
-  // never finding its target.
-  std::function<gz::rendering::VisualPtr(const gz::rendering::VisualPtr &)> findGeometryVisual =
-      [&](const gz::rendering::VisualPtr &_visual) -> gz::rendering::VisualPtr
-  {
-    if (_visual->GeometryCount() > 0 && _visual->Material())
-      return _visual;
-    for (unsigned int i = 0; i < _visual->ChildCount(); ++i)
-    {
-      auto child = std::dynamic_pointer_cast<gz::rendering::Visual>(_visual->ChildByIndex(i));
-      if (!child)
-        continue;
-      auto found = findGeometryVisual(child);
-      if (found)
-        return found;
-    }
-    return nullptr;
-  };
-  return findGeometryVisual(modelVisual);
+  return found;
 }
 
 void HumanControlPanel::ApplyCollisionVisibility()
@@ -2240,33 +2217,20 @@ void HumanControlPanel::ApplyCollisionVisibility()
     if (!human.velocityPublisher.Valid())
       continue;
 
-    const float desired = human.showCollision
-        ? kCollisionVisibleTransparency : kCollisionHiddenTransparency;
-
-    if (human.collisionMaterial)
-    {
-      if (human.appliedCollisionTransparency != desired)
-      {
-        human.collisionMaterial->SetTransparency(desired);
-        human.appliedCollisionTransparency = desired;
-      }
+    const int desired = human.showCollision ? 1 : 0;
+    if (human.appliedShowCollision == desired)
       continue;
-    }
-
     if (human.collisionVisualRetries > kCollisionVisualMaxRetries)
       continue;
 
     const std::string collisionModelName = human.name + "_collision";
-    gz::rendering::VisualPtr found = this->FindCollisionCapsuleVisual(scene, collisionModelName);
-    if (!found || !found->Material())
+    if (!this->SetCollisionBodyVisible(scene, collisionModelName, human.showCollision))
     {
-      // Diagnostic (fires once, on this human's very first failed search,
-      // not every retried frame): if FindCollisionCapsuleVisual() still
-      // can't find a geometry-bearing visual under collisionModelName even
-      // with the exact-name + suffix + recursive-descent lookup, dumping
-      // every scene visual whose name contains "collision" shows whatever
-      // naming scheme this gz-sim version/scene actually uses so the
-      // lookup can be adjusted to match it.
+      // Diagnostic (fires once per search that starts from scratch, not
+      // every retried frame): the companion model normally just needs a
+      // few more frames to appear, but if it never does, dumping every
+      // scene visual whose name mentions "collision" shows what naming
+      // scheme this gz-sim version's scene actually uses.
       if (human.collisionVisualRetries == 0)
       {
         gzmsg << "[HumanControlPanel] collision-visual '" << collisionModelName
@@ -2289,14 +2253,8 @@ void HumanControlPanel::ApplyCollisionVisibility()
       ++human.collisionVisualRetries;
       continue;
     }
-    // Clone rather than mutate the shared material directly -- otherwise
-    // every human's capsule (they all reference the same SDF-defined
-    // material) would flip transparency together instead of independently.
-    auto material = found->Material()->Clone();
-    found->SetMaterial(material, false);
-    human.collisionMaterial = material;
-    human.collisionMaterial->SetTransparency(desired);
-    human.appliedCollisionTransparency = desired;
+    human.appliedShowCollision = desired;
+    human.collisionVisualRetries = 0;
   }
 }
 }  // namespace gz_human_sim
