@@ -27,6 +27,53 @@
 
 namespace gz_human_sim
 {
+/// \brief One named pose the actor can be put into and held in, beyond its
+/// normal walk/idle behaviour. Adding another pose (wave, crouch, lie down,
+/// ...) is meant to be exactly one more row in kPoseClips below plus the
+/// matching <animation> entries in the model's SDF -- the state machine in
+/// PreUpdate() is written against this table, never against "sit"
+/// specifically.
+///
+/// Each pose is a three-clip cycle: enter (standing -> posed), hold (a short
+/// clip looped for as long as the pose is held), exit (posed -> standing).
+///
+/// heightOffset is the part gz-sim cannot do for us. gz-sim strips an
+/// actor animation's root-node motion out of the skeleton and expects the
+/// TrajectoryPose component to supply it instead -- which is why an actor's
+/// origin behaves as its hip rather than its feet, and why the model's
+/// spawn z is ~1.0. This plugin writes X/Y/yaw into TrajectoryPose but has
+/// no idea what the clip's own vertical root motion was, so without this
+/// the actor plays the sit-down animation while its hip stays pinned at
+/// standing height -- i.e. it sits down in mid-air. Measured directly off
+/// the .dae files (the Hips node's animated transform):
+///
+///   walk.dae      hip z ~= 1.015          (standing reference)
+///   sit_down.dae  hip z 1.031 -> 0.641    (drops 0.390)
+///   sitting.dae   hip z ~= 0.641          (held)
+///   stand_up.dae  hip z 0.641 -> 1.031    (exact reverse of sit_down)
+///
+/// so a seated actor's origin has to be driven 0.390 m below wherever
+/// standing puts it. Expressed as a delta rather than an absolute height on
+/// purpose: it stays correct regardless of the per-model spawn z offset.
+struct PoseClip
+{
+  const char *name;
+  const char *enterAnimation;
+  const char *holdAnimation;
+  const char *exitAnimation;
+  // Clip lengths in seconds, measured from the .dae keyframe timelines.
+  double enterSeconds;
+  double holdSeconds;
+  double exitSeconds;
+  double heightOffset;
+};
+
+static constexpr PoseClip kPoseClips[] = {
+  {"sit", "sit_down", "sitting", "stand_up", 6.625, 4.083, 6.625, -0.390},
+};
+static constexpr int kPoseClipCount =
+    static_cast<int>(sizeof(kPoseClips) / sizeof(kPoseClips[0]));
+
 class ActorCommandPlugin
     : public gz::sim::System,
       public gz::sim::ISystemConfigure,
@@ -49,7 +96,14 @@ class ActorCommandPlugin
     this->removeTopic = _sdf->Get<std::string>("remove_topic", "/remove_actor").first;
     this->followModeTopic =
         _sdf->Get<std::string>("follow_mode_topic", "/set_follow_mode").first;
-    this->sitTopic = _sdf->Get<std::string>("sit_topic", "/cmd_sit").first;
+    this->poseTopic = _sdf->Get<std::string>("pose_topic", "/cmd_pose").first;
+    // How much faster than real time the enter/hold/exit clips in kPoseClips
+    // are played. The sit_down/stand_up clips are 6.6 s of mocap each, which
+    // reads as slow-motion next to the walk cycle; ~2.5x puts a full sit at
+    // roughly 2.6 s, which is about how long sitting down actually takes.
+    // SDF-tunable rather than hardcoded since it's a taste/realism knob.
+    this->poseSpeed = std::max(0.1,
+        _sdf->Get<double>("pose_speed", 2.5).first);
     this->animationName = _sdf->Get<std::string>("animation_name", "walk").first;
     this->animationFactor = _sdf->Get<double>("animation_factor", 4.0).first;
     this->linearVelocity = _sdf->Get<double>("linear_velocity", 1.0).first;
@@ -139,9 +193,9 @@ class ActorCommandPlugin
           &ActorCommandPlugin::FollowModeCallback, this))
       gzerr << "Failed to subscribe to follow_mode topic: " << this->followModeTopic
             << std::endl;
-    if (!this->transportNode.Subscribe(this->sitTopic,
-          &ActorCommandPlugin::SitCallback, this))
-      gzerr << "Failed to subscribe to sit topic: " << this->sitTopic << std::endl;
+    if (!this->transportNode.Subscribe(this->poseTopic,
+          &ActorCommandPlugin::PoseCallback, this))
+      gzerr << "Failed to subscribe to pose topic: " << this->poseTopic << std::endl;
   }
 
   public: void PreUpdate(const gz::sim::UpdateInfo &_info,
@@ -191,112 +245,139 @@ class ActorCommandPlugin
     gz::math::Pose3d nextPose = currentPose;
     double distanceTravelled = 0.0;
 
-    // Sit state machine: sitIntent ("does the GUI currently want this actor
-    // seated") only ever flips a bool -- SittingDown/Sitting/StandingUp are
-    // this plugin's own bookkeeping of where the sit_down/stand_up
-    // transition clips currently are, entered/left below. Interrupting
-    // mid-transition (sitIntent flips back before a clip finishes) just
-    // reverses direction from wherever the clip currently is, rather than
-    // waiting for it to complete first.
-    bool sitIntent;
+    // Pose state machine. requestedPose ("which named pose, if any, does the
+    // GUI currently want this actor held in") is the only input; Entering/
+    // Holding/Exiting is this plugin's own bookkeeping of where the current
+    // pose's enter/exit clips are. See kPoseClips for the table this is
+    // driven by -- nothing below is specific to sitting.
+    std::string requestedPose;
+    double requestedSupportHeight = 0.0;
     {
       std::lock_guard<std::mutex> lock(this->commandMutex);
-      sitIntent = this->sitIntent;
+      requestedPose = this->requestedPose;
+      requestedSupportHeight = this->requestedSupportHeight;
     }
-    // Accumulate once per tick for whichever sit-related clip is currently
-    // playing (SittingDown/Sitting/StandingUp all use this same counter,
-    // reset to zero every time the state below changes) -- kept separate
-    // from this->animationTime (the walk cycle's own distance-driven
-    // clock) so switching back and forth doesn't corrupt either one.
-    if (this->sitState != SitState::Standing)
-      this->sitAnimationTime += _info.dt;
+    const int requestedIndex = PoseIndex(requestedPose);
+    // Playback clock for whichever enter/hold/exit clip is running, scaled by
+    // poseSpeed so the table can keep the .dae files' true lengths. Kept
+    // separate from this->animationTime (the walk cycle's own
+    // distance-driven clock) so switching back and forth doesn't corrupt
+    // either one.
+    if (this->poseState != PoseState::None)
+      this->poseClipTime += dt * this->poseSpeed;
 
-    switch (this->sitState)
+    switch (this->poseState)
     {
-      case SitState::Standing:
-        if (sitIntent)
+      case PoseState::None:
+        if (requestedIndex >= 0)
         {
-          // Freeze the actor's footprint for the whole sit/stand cycle --
-          // it has no legs to plant, so unlike a real person it can't also
-          // walk while sitting down/standing up.
+          // Freeze the actor's footprint for the whole enter/hold/exit
+          // cycle -- it has no legs to plant, so unlike a real person it
+          // can't also walk while sitting down or standing back up.
           this->frozenPose = currentPose;
-          this->sitState = SitState::SittingDown;
-          this->sitAnimationTime = std::chrono::steady_clock::duration::zero();
+          this->activePoseIndex = requestedIndex;
+          this->activeSupportHeight = requestedSupportHeight;
+          this->poseState = PoseState::Entering;
+          this->poseClipTime = 0.0;
         }
         break;
-      case SitState::SittingDown:
-        if (!sitIntent)
+      case PoseState::Entering:
+        if (requestedIndex != this->activePoseIndex)
         {
-          this->sitState = SitState::StandingUp;
-          this->sitAnimationTime = std::chrono::steady_clock::duration::zero();
+          // Reversing mid-transition: start the exit clip at the point that
+          // MIRRORS how far the enter clip got, instead of restarting it
+          // from frame 0. enter and exit are the same mocap take played in
+          // opposite directions (verified against the .dae keyframes:
+          // stand_up is sit_down reversed, frame for frame), so this makes
+          // an interrupted sit reverse smoothly out of wherever the body
+          // currently is -- rather than snapping to the fully-seated pose
+          // first and standing up from there, which is what made a quick
+          // K tap look broken.
+          this->poseClipTime = ExitSeconds(this->activePoseIndex) *
+              (1.0 - Progress(this->poseClipTime, EnterSeconds(this->activePoseIndex)));
+          this->poseState = PoseState::Exiting;
         }
-        else if (this->sitAnimationTime >= kSitDownDuration)
+        else if (this->poseClipTime >= EnterSeconds(this->activePoseIndex))
         {
-          this->sitState = SitState::Sitting;
-          this->sitAnimationTime = std::chrono::steady_clock::duration::zero();
+          this->poseState = PoseState::Holding;
+          this->poseClipTime = 0.0;
         }
         break;
-      case SitState::Sitting:
-        if (!sitIntent)
+      case PoseState::Holding:
+        if (requestedIndex != this->activePoseIndex)
         {
-          this->sitState = SitState::StandingUp;
-          this->sitAnimationTime = std::chrono::steady_clock::duration::zero();
+          this->poseState = PoseState::Exiting;
+          this->poseClipTime = 0.0;
         }
         break;
-      case SitState::StandingUp:
-        if (sitIntent)
+      case PoseState::Exiting:
+        if (requestedIndex == this->activePoseIndex)
         {
-          this->sitState = SitState::SittingDown;
-          this->sitAnimationTime = std::chrono::steady_clock::duration::zero();
+          // Same mirroring as the Entering case above, in the other
+          // direction.
+          this->poseClipTime = EnterSeconds(this->activePoseIndex) *
+              (1.0 - Progress(this->poseClipTime, ExitSeconds(this->activePoseIndex)));
+          this->poseState = PoseState::Entering;
         }
-        else if (this->sitAnimationTime >= kStandUpDuration)
+        else if (this->poseClipTime >= ExitSeconds(this->activePoseIndex))
         {
-          this->sitState = SitState::Standing;
-          this->sitAnimationTime = std::chrono::steady_clock::duration::zero();
+          this->poseState = PoseState::None;
+          this->activePoseIndex = -1;
+          this->activeSupportHeight = 0.0;
+          this->poseClipTime = 0.0;
           // Restart the walk cycle from its beginning next time the actor
           // actually moves, rather than resuming from wherever it was
-          // parked before sitting down.
+          // parked before the pose started.
           this->animationTime = std::chrono::steady_clock::duration::zero();
         }
         break;
     }
 
-    // Drained every tick regardless of sit state: while sitting this just
+    // Drained every tick regardless of pose state: while posed this just
     // discards whatever arrived on velocityTopic (never applied to
     // this->velocity below), instead of letting the queue grow unbounded
-    // for as long as the actor stays seated -- the newest command is still
+    // for as long as the actor stays posed -- the newest command is still
     // what's in effect the moment PreUpdate resumes using it, once back to
-    // Standing, since only the latest queued entry survives either way.
+    // None, since only the latest queued entry survives either way.
     this->ApplyNewestVelocity();
 
-    if (this->sitState != SitState::Standing)
+    if (this->poseState != PoseState::None)
     {
-      // Sitting/transitioning: no path/velocity/jump integration at all,
-      // the actor just holds the pose it had the moment it started sitting
-      // down. See the animation/AnimationName block below (after the
-      // existing walk-cycle AnimationTime write) for what actually plays.
+      // Posed/transitioning: no path/velocity/jump integration at all, the
+      // actor just holds the footprint it had the moment the pose started.
+      // See the animation/AnimationName block below (after the existing
+      // walk-cycle AnimationTime write) for what actually plays.
       nextPose = this->frozenPose;
+      // ...but the actor's HEIGHT does have to move, because gz-sim threw
+      // the clip's own vertical root motion away -- see PoseClip's comment.
+      // Ramped with the clip rather than snapped, so the body descends into
+      // the pose instead of teleporting down on the first frame.
+      nextPose.Pos().Z(this->CurrentPoseHeightOffset());
       // The companion physics body (see Configure()'s comment and the
       // collision-body block below) is driven by gz-sim-velocity-control-
       // system, which holds whatever velocity it was last told to use
       // until a new command arrives -- it does NOT stop on its own just
       // because this plugin stops republishing every tick. Left alone, it
-      // would keep coasting on the last pre-sit velocity for the entire
-      // sit/stand cycle, drifting away from frozenPose, and PreUpdate would
-      // then read that drifted pose back and teleport the actor to it the
-      // moment it stands back up (see collisionEntity/syncedFromCollisionBody
-      // below). Explicitly pinning it to zero here, every tick, is what
-      // keeps it (and therefore the actor, once movement resumes) actually
-      // parked at frozenPose for the whole sit.
+      // would keep coasting on the last pre-pose velocity for the entire
+      // enter/hold/exit cycle, drifting away from frozenPose, and PreUpdate
+      // would then read that drifted pose back and teleport the actor to it
+      // the moment the pose ends (see collisionEntity/
+      // syncedFromCollisionBody below). Explicitly pinning it to zero here,
+      // every tick, is what keeps it (and therefore the actor, once movement
+      // resumes) actually parked at frozenPose for the whole pose.
       this->DriveCollisionBody(_ecm, gz::msgs::Twist(), nullptr);
-      // Jump requests received while sitting would otherwise sit in
-      // jumpRequested (only consumed by the jump block inside the Standing
-      // branch below) and fire as a surprise jump the instant the actor
-      // stands back up. Discard them instead -- sitting has no jump.
+      // Jump requests received while posed would otherwise sit in
+      // jumpRequested (only consumed by ApplyStandingMotion's jump block)
+      // and fire as a surprise jump the instant the pose ends. Discard them
+      // instead -- a held pose has no jump. Any jump still in flight when
+      // the pose started is cancelled for the same reason.
       {
         std::lock_guard<std::mutex> lock(this->commandMutex);
         this->jumpRequested = false;
       }
+      this->jumpZ = 0.0;
+      this->jumpVelocityZ = 0.0;
+      this->jumpCount = 0;
     }
     else
     {
@@ -306,7 +387,7 @@ class ActorCommandPlugin
     *trajectoryPose = gz::sim::components::TrajectoryPose(nextPose);
     _ecm.SetChanged(this->entity, gz::sim::components::TrajectoryPose::typeId,
         gz::sim::ComponentState::OneTimeChange);
-    if (this->sitState == SitState::Standing && distanceTravelled > 0.0)
+    if (this->poseState == PoseState::None && distanceTravelled > 0.0)
     {
       const auto animationStep = std::chrono::duration_cast<
           std::chrono::steady_clock::duration>(
@@ -333,33 +414,33 @@ class ActorCommandPlugin
     // for the same guard on its own, otherwise-unrelated, animation path).
     std::string desiredAnimationName = this->animationName;
     std::chrono::steady_clock::duration desiredAnimationTime = this->animationTime;
-    switch (this->sitState)
+    if (this->poseState != PoseState::None)
     {
-      case SitState::Standing:
-        break;
-      case SitState::SittingDown:
-        desiredAnimationName = "sit_down";
-        desiredAnimationTime = std::min(this->sitAnimationTime, kSitDownDuration);
-        break;
-      case SitState::Sitting:
+      const PoseClip &clip = kPoseClips[this->activePoseIndex];
+      double clipSeconds = this->poseClipTime;
+      switch (this->poseState)
       {
-        desiredAnimationName = "sitting";
-        // sitting.dae is a short clip meant to be held/looped for as long
-        // as the actor stays seated; loop it here explicitly rather than
-        // assuming gz-sim wraps AnimationTime past a clip's own duration
-        // on its own.
-        const double loopSeconds = std::fmod(
-            std::chrono::duration<double>(this->sitAnimationTime).count(),
-            std::chrono::duration<double>(kSittingLoopDuration).count());
-        desiredAnimationTime = std::chrono::duration_cast<
-            std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(loopSeconds));
-        break;
+        case PoseState::None:
+          break;
+        case PoseState::Entering:
+          desiredAnimationName = clip.enterAnimation;
+          clipSeconds = std::min(clipSeconds, clip.enterSeconds);
+          break;
+        case PoseState::Holding:
+          desiredAnimationName = clip.holdAnimation;
+          // The hold clip is short and meant to be looped for as long as
+          // the pose is held; wrap it here explicitly rather than assuming
+          // gz-sim wraps AnimationTime past a clip's own duration on its own.
+          clipSeconds = std::fmod(clipSeconds, clip.holdSeconds);
+          break;
+        case PoseState::Exiting:
+          desiredAnimationName = clip.exitAnimation;
+          clipSeconds = std::min(clipSeconds, clip.exitSeconds);
+          break;
       }
-      case SitState::StandingUp:
-        desiredAnimationName = "stand_up";
-        desiredAnimationTime = std::min(this->sitAnimationTime, kStandUpDuration);
-        break;
+      desiredAnimationTime = std::chrono::duration_cast<
+          std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(clipSeconds));
     }
     if (desiredAnimationName != this->appliedAnimationName)
     {
@@ -373,7 +454,7 @@ class ActorCommandPlugin
         this->appliedAnimationName = desiredAnimationName;
       }
     }
-    if (this->sitState != SitState::Standing)
+    if (this->poseState != PoseState::None)
     {
       auto animationTimeComponent = _ecm.Component<gz::sim::components::AnimationTime>(
           this->entity);
@@ -512,14 +593,102 @@ class ActorCommandPlugin
     this->SetFollowMode(_message.data());
   }
 
-  /// \brief Sit/stand intent from the GUI's K (hold) / K+Space (lock) keys
-  /// or its sit toggle button -- see the sit state machine at the top of
-  /// PreUpdate() for how "sit" vs "stand" actually drives the
-  /// sit_down/sitting/stand_up clips.
-  private: void SitCallback(const gz::msgs::StringMsg &_message)
+  /// \brief Which named pose (see kPoseClips) the GUI currently wants this
+  /// actor held in -- from a pose hold key (K = sit) or the panel's pose
+  /// lock. See the pose state machine at the top of PreUpdate().
+  ///
+  /// Payload is `<pose name>`, optionally followed by a support height in
+  /// metres: `"sit"` sits on the floor, `"sit 0.45"` sits on something
+  /// 0.45 m off the floor (a chair seat, a step, a bed edge). Anything that
+  /// isn't a known pose name -- including the empty string and the literal
+  /// "stand" the older sit-only protocol used -- means "no pose", which
+  /// exits whatever pose is currently held.
+  private: void PoseCallback(const gz::msgs::StringMsg &_message)
   {
+    std::string name = _message.data();
+    double supportHeight = 0.0;
+    const auto separator = name.find(' ');
+    if (separator != std::string::npos)
+    {
+      try
+      {
+        supportHeight = std::stod(name.substr(separator + 1));
+      }
+      catch (const std::exception &)
+      {
+        gzwarn << "ActorCommandPlugin: could not parse a support height out of '"
+               << name << "', treating it as 0." << std::endl;
+      }
+      name = name.substr(0, separator);
+    }
     std::lock_guard<std::mutex> lock(this->commandMutex);
-    this->sitIntent = (_message.data() == "sit");
+    this->requestedPose = name;
+    this->requestedSupportHeight = supportHeight;
+  }
+
+  /// \brief Index into kPoseClips for a pose name, or -1 for "no pose"
+  /// (unknown name, empty string, or the legacy "stand").
+  private: static int PoseIndex(const std::string &_name)
+  {
+    for (int i = 0; i < kPoseClipCount; ++i)
+    {
+      if (_name == kPoseClips[i].name)
+        return i;
+    }
+    return -1;
+  }
+
+  /// \brief 0..1 through a clip of _seconds length, clamped. Guards against
+  /// a zero-length clip in the table rather than dividing by zero.
+  private: static double Progress(double _elapsed, double _seconds)
+  {
+    if (_seconds <= 0.0)
+      return 1.0;
+    return std::clamp(_elapsed / _seconds, 0.0, 1.0);
+  }
+
+  private: double EnterSeconds(int _poseIndex) const
+  {
+    return kPoseClips[_poseIndex].enterSeconds / this->poseSpeed;
+  }
+
+  private: double ExitSeconds(int _poseIndex) const
+  {
+    return kPoseClips[_poseIndex].exitSeconds / this->poseSpeed;
+  }
+
+  /// \brief How far below its normal standing height the actor's origin has
+  /// to be right now, given where the current pose's clip has got to.
+  ///
+  /// See PoseClip's comment for why an offset is needed at all. Ramped
+  /// linearly across the enter/exit clips: the real hip curve isn't quite
+  /// linear (measured 1.031 -> 0.816 -> 0.641 across sit_down, vs 0.836 at
+  /// the linear midpoint), but 2 cm of error mid-transition is invisible
+  /// next to the 39 cm of float this exists to remove, and it keeps the
+  /// table to one number per pose instead of a sampled curve.
+  ///
+  /// activeSupportHeight raises the whole thing for a pose taken on top of
+  /// something: sitting on a 0.45 m chair seat puts the hip 0.45 m higher
+  /// than sitting on the floor does.
+  private: double CurrentPoseHeightOffset() const
+  {
+    if (this->poseState == PoseState::None || this->activePoseIndex < 0)
+      return 0.0;
+    const double held =
+        kPoseClips[this->activePoseIndex].heightOffset + this->activeSupportHeight;
+    switch (this->poseState)
+    {
+      case PoseState::Entering:
+        return held * Progress(this->poseClipTime,
+            this->EnterSeconds(this->activePoseIndex));
+      case PoseState::Exiting:
+        return held * (1.0 - Progress(this->poseClipTime,
+            this->ExitSeconds(this->activePoseIndex)));
+      case PoseState::Holding:
+      case PoseState::None:
+        break;
+    }
+    return held;
   }
 
   private: void PathCallback(const gz::msgs::Pose_V &_message)
@@ -550,14 +719,14 @@ class ActorCommandPlugin
     }
   }
 
-  /// \brief Normal (non-sitting) movement: path/velocity command source
+  /// \brief Normal (un-posed) movement: path/velocity command source
   /// selection, the collision-body command, and the jump Z-overlay -- exactly
-  /// what PreUpdate() always did before the sit state machine existed,
+  /// what PreUpdate() always did before the pose state machine existed,
   /// just pulled out into its own method (a) so PreUpdate() itself reads
-  /// as "sitting freeze, or else normal motion" instead of a page of
+  /// as "held-pose freeze, or else normal motion" instead of a page of
   /// nested logic, and (b) since it's meaningful on its own: this is the
   /// only place _nextPose/_distanceTravelled get touched when
-  /// `sitState == Standing`.
+  /// `poseState == None`.
   private: void ApplyStandingMotion(gz::sim::EntityComponentManager &_ecm,
       const gz::math::Pose3d &_currentPose, gz::math::Pose3d &_nextPose,
       double _dt, double &_distanceTravelled)
@@ -571,6 +740,10 @@ class ActorCommandPlugin
       std::lock_guard<std::mutex> lock(this->commandMutex);
       followMode = this->followMode;
     }
+    // Before the movement branches, not after: the velocity branch needs
+    // this tick's jumpZ to tell the collision body how high to be. See
+    // IntegrateJump().
+    this->IntegrateJump(_ecm, _dt);
     // follow_mode gates which command source may drive the actor this tick:
     //   "auto"     -- path takes over whenever one is queued/active, otherwise
     //                 velocity (this is the pre-existing behaviour, unchanged).
@@ -651,35 +824,25 @@ class ActorCommandPlugin
         collisionTwist.mutable_linear()->set_x(bodyLinear);
         collisionTwist.mutable_linear()->set_y(bodyLateral);
         collisionTwist.mutable_angular()->set_z(bodyAngularRate);
+        // Vertical component so the capsule rises and falls with the actor's
+        // jump instead of staying planted on the floor -- see
+        // CollisionJumpRate(). Zero whenever the actor is grounded, so this
+        // costs nothing in the normal walking case.
+        collisionTwist.mutable_linear()->set_z(this->CollisionJumpRate(_ecm, _dt));
         // No teleport here on purpose (see DriveCollisionBody()): this is
         // the branch where the physics body -- not the actor -- decides
         // where the human ends up.
         this->DriveCollisionBody(_ecm, collisionTwist, nullptr);
-        const gz::sim::Entity resolvedCollisionEntity =
-            this->ResolveCollisionEntity(_ecm);
-        if (resolvedCollisionEntity != gz::sim::kNullEntity)
+        gz::math::Pose3d resolved;
+        if (this->CollisionBodyPose(_ecm, resolved))
         {
-          auto collisionPose = _ecm.Component<gz::sim::components::Pose>(
-              resolvedCollisionEntity);
-          if (collisionPose != nullptr)
-          {
-            const gz::math::Pose3d resolved = collisionPose->Data();
-            const double dx = resolved.Pos().X() - _currentPose.Pos().X();
-            const double dy = resolved.Pos().Y() - _currentPose.Pos().Y();
-            _nextPose.Pos().X(resolved.Pos().X());
-            _nextPose.Pos().Y(resolved.Pos().Y());
-            _nextPose.Rot() = gz::math::Quaterniond(0.0, 0.0, resolved.Rot().Yaw());
-            _distanceTravelled = std::hypot(dx, dy);
-            syncedFromCollisionBody = true;
-          }
-          else
-          {
-            // Entity existed under that name but isn't a real pose-bearing
-            // model (or vanished) -- stop trusting the cached id and fall
-            // back to uncollided motion below until a fresh lookup finds
-            // it again.
-            this->collisionEntity = gz::sim::kNullEntity;
-          }
+          const double dx = resolved.Pos().X() - _currentPose.Pos().X();
+          const double dy = resolved.Pos().Y() - _currentPose.Pos().Y();
+          _nextPose.Pos().X(resolved.Pos().X());
+          _nextPose.Pos().Y(resolved.Pos().Y());
+          _nextPose.Rot() = gz::math::Quaterniond(0.0, 0.0, resolved.Rot().Yaw());
+          _distanceTravelled = std::hypot(dx, dy);
+          syncedFromCollisionBody = true;
         }
       }
       if (!syncedFromCollisionBody)
@@ -696,17 +859,30 @@ class ActorCommandPlugin
         _distanceTravelled = std::hypot(dx, dy);
       }
     }
-    // Jump is a Z-only overlay on top of whatever X/Y/yaw motion the path or
-    // velocity branch above just computed -- so "jump while walking" needs
-    // no special handling: the horizontal component keeps coming from
-    // this->velocity (or the active path) exactly as it already would, and
-    // this just adds a projectile-motion Z arc on top. Integrated as a
-    // running (jumpZ, jumpVelocityZ) state each tick (Euler step) rather
-    // than a closed-form parabola keyed on elapsed-time-since-launch, so a
-    // double jump can simply re-kick jumpVelocityZ from wherever the actor
-    // currently is mid-air, instead of needing to reason about restarting a
-    // parabola from a nonzero height. jumpCount (0 = grounded, 1 = single
-    // jump used, 2 = double jump used) gates JumpCallback() -- see there.
+    _nextPose.Pos().Z(this->jumpZ);
+  }
+
+  /// \brief Advances the jump arc for this tick. Jump is a Z-only overlay on
+  /// top of whatever X/Y/yaw motion the path or velocity branch computes --
+  /// so "jump while walking" needs no special handling: the horizontal
+  /// component keeps coming from this->velocity (or the active path) exactly
+  /// as it already would, and this just adds a projectile-motion Z arc on
+  /// top. Integrated as a running (jumpZ, jumpVelocityZ) state each tick
+  /// (Euler step) rather than a closed-form parabola keyed on
+  /// elapsed-time-since-launch, so a double jump can simply re-kick
+  /// jumpVelocityZ from wherever the actor currently is mid-air, instead of
+  /// needing to reason about restarting a parabola from a nonzero height.
+  /// jumpCount (0 = grounded, 1 = single jump used, 2 = double jump used)
+  /// gates JumpCallback() -- see there.
+  ///
+  /// Runs BEFORE the movement branches rather than after them (where it used
+  /// to live) so that jumpZ is already current for this tick when the
+  /// velocity branch builds the collision body's Twist -- that's what lets
+  /// the debug capsule rise and fall with the actor instead of staying
+  /// planted on the floor while the human hops out of it.
+  private: void IntegrateJump(gz::sim::EntityComponentManager &_ecm, double _dt)
+  {
+    bool launched = false;
     {
       std::lock_guard<std::mutex> lock(this->commandMutex);
       if (this->jumpRequested)
@@ -714,24 +890,51 @@ class ActorCommandPlugin
         this->jumpVelocityZ = std::sqrt(2.0 * kGravity * this->jumpHeightParam);
         ++this->jumpCount;
         this->jumpRequested = false;
+        launched = this->jumpCount == 1;
       }
     }
-    if (this->jumpCount > 0)
+    // Taking off from the ground (not a mid-air double jump): remember where
+    // the collision body was resting, so the arc below is measured from
+    // whatever it was standing on rather than assuming z=0. Jumping off a
+    // step or a kerb then lands the capsule back on that step.
+    if (launched)
     {
-      this->jumpVelocityZ -= kGravity * _dt;
-      this->jumpZ += this->jumpVelocityZ * _dt;
-      if (this->jumpZ <= 0.0)
-      {
-        this->jumpZ = 0.0;
-        this->jumpVelocityZ = 0.0;
-        this->jumpCount = 0;
-      }
-      _nextPose.Pos().Z(this->jumpZ);
+      gz::math::Pose3d collisionPose;
+      this->jumpCollisionBaseZ = this->CollisionBodyPose(_ecm, collisionPose)
+          ? collisionPose.Pos().Z() : 0.0;
     }
-    else
+    if (this->jumpCount == 0)
+      return;
+    this->jumpVelocityZ -= kGravity * _dt;
+    this->jumpZ += this->jumpVelocityZ * _dt;
+    if (this->jumpZ <= 0.0)
     {
-      _nextPose.Pos().Z(0.0);
+      this->jumpZ = 0.0;
+      this->jumpVelocityZ = 0.0;
+      this->jumpCount = 0;
     }
+  }
+
+  /// \brief Vertical velocity to command the collision body with this tick so
+  /// it tracks the actor's jump arc.
+  ///
+  /// Deliberately a position-error correction ((target - actual) / dt) rather
+  /// than simply echoing jumpVelocityZ: gz-sim-velocity-control-system sets
+  /// the body's velocity outright each step, so any difference between our
+  /// Euler integration and the engine's would otherwise accumulate over the
+  /// arc and leave the capsule hanging a few centimetres off the floor after
+  /// landing. Driving on the error instead makes every tick self-correcting,
+  /// and still leaves contacts free to resolve normally (this is a velocity
+  /// command, not a teleport -- the capsule can still be stopped by a
+  /// ceiling).
+  private: double CollisionJumpRate(gz::sim::EntityComponentManager &_ecm,
+      double _dt)
+  {
+    gz::math::Pose3d collisionPose;
+    if (_dt <= 0.0 || !this->CollisionBodyPose(_ecm, collisionPose))
+      return 0.0;
+    const double target = this->jumpCollisionBaseZ + this->jumpZ;
+    return (target - collisionPose.Pos().Z()) / _dt;
   }
 
   /// \brief Lazily resolves and caches the companion collision-body entity
@@ -740,6 +943,31 @@ class ActorCommandPlugin
   /// removalRequested block) and ApplyStandingMotion() -- previously each
   /// had its own copy of this same null-check-then-EntityByComponents()
   /// lookup.
+  /// \brief Reads the companion collision body's current world pose, i.e.
+  /// wherever physics actually let it end up last step. False means there
+  /// isn't one to read (none configured, still mid-spawn, or just removed) --
+  /// every caller has an uncollided fallback for that case.
+  ///
+  /// Also self-heals the cached entity id: an id that resolves to something
+  /// without a Pose component is a stale/vanished entity, so it's dropped
+  /// and the next tick looks the name up again rather than silently doing
+  /// nothing forever.
+  private: bool CollisionBodyPose(gz::sim::EntityComponentManager &_ecm,
+      gz::math::Pose3d &_pose)
+  {
+    const gz::sim::Entity resolved = this->ResolveCollisionEntity(_ecm);
+    if (resolved == gz::sim::kNullEntity)
+      return false;
+    auto collisionPose = _ecm.Component<gz::sim::components::Pose>(resolved);
+    if (collisionPose == nullptr)
+    {
+      this->collisionEntity = gz::sim::kNullEntity;
+      return false;
+    }
+    _pose = collisionPose->Data();
+    return true;
+  }
+
   private: gz::sim::Entity ResolveCollisionEntity(
       gz::sim::EntityComponentManager &_ecm)
   {
@@ -883,7 +1111,7 @@ class ActorCommandPlugin
   private: std::string jumpTopic;
   private: std::string removeTopic;
   private: std::string followModeTopic;
-  private: std::string sitTopic;
+  private: std::string poseTopic;
   private: bool removalRequested{false};
   private: std::string animationName;
   private: std::string followMode{"auto"};
@@ -916,6 +1144,10 @@ class ActorCommandPlugin
   // see JumpCallback()/the PreUpdate() jump block.
   private: int jumpCount{0};
   private: double jumpHeightParam{1.0};
+  // World Z the collision body was resting at when the current jump left the
+  // ground -- the arc is measured from there, not from an assumed z=0, so
+  // jumping off a step lands back on the step. See IntegrateJump().
+  private: double jumpCollisionBaseZ{0.0};
   private: std::chrono::steady_clock::duration animationTime{
       std::chrono::steady_clock::duration::zero()};
   // Name currently written to the AnimationName component -- see the
@@ -923,29 +1155,28 @@ class ActorCommandPlugin
   // why this has to be tracked instead of writing unconditionally.
   private: std::string appliedAnimationName;
 
-  /// \brief Sit/stand cycle driven by sit_topic (SitCallback()) -- see the
-  /// state machine at the top of PreUpdate(). Standing is the plugin's
-  /// original walk/path/velocity behaviour, unchanged; the other three
-  /// states play sit_down/sitting/stand_up in order while freezing the
-  /// actor's footprint at whatever pose it had when it started sitting.
-  private: enum class SitState { Standing, SittingDown, Sitting, StandingUp };
-  private: SitState sitState{SitState::Standing};
-  private: bool sitIntent{false};
+  /// \brief Named-pose cycle driven by pose_topic (PoseCallback()) -- see
+  /// kPoseClips for the pose table and the state machine at the top of
+  /// PreUpdate(). None is the plugin's original walk/path/velocity
+  /// behaviour, unchanged; the other three play the active pose's
+  /// enter/hold/exit clips in order while freezing the actor's footprint at
+  /// whatever pose it had when the pose started.
+  private: enum class PoseState { None, Entering, Holding, Exiting };
+  private: PoseState poseState{PoseState::None};
+  // What the GUI is asking for right now (transport thread) vs. what's
+  // actually playing (simulation thread). requestedSupportHeight/
+  // activeSupportHeight are the "what is it being done on top of" height
+  // from the pose command -- 0 for the floor, a seat height for a chair.
+  private: std::string requestedPose;
+  private: double requestedSupportHeight{0.0};
+  private: int activePoseIndex{-1};
+  private: double activeSupportHeight{0.0};
+  // Seconds into the current enter/hold/exit clip, already scaled by
+  // poseSpeed (so it's compared directly against EnterSeconds()/
+  // ExitSeconds(), not against the table's raw clip lengths).
+  private: double poseClipTime{0.0};
+  private: double poseSpeed{2.5};
   private: gz::math::Pose3d frozenPose{gz::math::Pose3d::Zero};
-  private: std::chrono::steady_clock::duration sitAnimationTime{
-      std::chrono::steady_clock::duration::zero()};
-  // Clip lengths (measured from the .dae files under models/walking_actor/
-  // meshes/), used to know when to advance sitState past sit_down/stand_up
-  // and to loop sitting.dae manually -- see PreUpdate()'s animation block.
-  private: static constexpr std::chrono::steady_clock::duration kSitDownDuration =
-      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-          std::chrono::milliseconds(6625));
-  private: static constexpr std::chrono::steady_clock::duration kStandUpDuration =
-      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-          std::chrono::milliseconds(6625));
-  private: static constexpr std::chrono::steady_clock::duration kSittingLoopDuration =
-      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-          std::chrono::milliseconds(4083));
 };
 }  // namespace gz_human_sim
 

@@ -43,7 +43,7 @@ def _resolve_actor_model(context, namespace, model_name, collision_model_name,
         _actor_topic(namespace, 'cmd_path'), _actor_topic(namespace, 'remove_actor'),
         _actor_topic(namespace, 'set_follow_mode'),
         jump_topic=_actor_topic(namespace, 'cmd_jump'),
-        sit_topic=_actor_topic(namespace, 'cmd_sit'),
+        pose_topic=_actor_topic(namespace, 'cmd_pose'),
         collision_model_name=collision_model_name,
         collision_cmd_vel_topic=collision_cmd_vel_topic, follow_mode=follow_mode)
 

@@ -142,13 +142,47 @@ static bool IsActorIndex(int _index)
   return _index >= 0 && _index < 2;
 }
 
-// Only walking_actor ships sit_down/sitting/stand_up meshes (see
-// models/walking_actor/meshes/) -- DoctorFemaleWalk has a single walk-only
-// mesh, so the sit feature (K key / Space lock / QML toggle) is narrower
-// than IsActorIndex() above.
-static bool IsSitCapableIndex(int _index)
+// Only walking_actor ships the extra pose clips (sit_down/sitting/stand_up,
+// see models/walking_actor/meshes/) -- DoctorFemaleWalk has a single
+// walk-only mesh, so the named-pose feature is narrower than IsActorIndex()
+// above.
+static bool IsPoseCapableIndex(int _index)
 {
   return _index == 0;
+}
+
+// Poses that can be held down on a key, mirroring ActorCommandPlugin's own
+// kPoseClips table (the `pose` strings here are exactly what it matches on).
+//
+// This is the one place a new pose gets wired to the keyboard: add a row
+// here, a row in the plugin's kPoseClips, and the <animation> entries in the
+// model SDF. Everything else -- the held-pose property, the L-key
+// registration, the status lines, the QML button -- is written against the
+// table rather than against "sit", so none of it needs touching.
+struct PoseShortcut
+{
+  int key;              // Qt::Key_*
+  const char *pose;     // published to the actor's pose_topic
+  const char *label;    // shown in the panel/status line
+};
+static const PoseShortcut kPoseShortcuts[] = {
+  {Qt::Key_K, "sit", "着席"},
+};
+static constexpr int kPoseShortcutCount =
+    static_cast<int>(sizeof(kPoseShortcuts) / sizeof(kPoseShortcuts[0]));
+
+// Label shown for "no pose held" -- i.e. the actor's ordinary standing/
+// walking behaviour, which the L key can register just like any other pose.
+static const char *const kNoPoseLabel = "立ち";
+
+static const PoseShortcut *PoseShortcutForKey(int _key)
+{
+  for (int i = 0; i < kPoseShortcutCount; ++i)
+  {
+    if (kPoseShortcuts[i].key == _key)
+      return &kPoseShortcuts[i];
+  }
+  return nullptr;
 }
 
 // Movement layout (Q W E / A _ D / Z X C, center vacated -- S and N are
@@ -412,26 +446,34 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
       // speed above.
       this->RefreshHeldMovementSpeed();
     }
-    else if (keyEvent->key() == Qt::Key_K && !keyEvent->isAutoRepeat() &&
-        pressed != this->kHeldState)
+    else if (!keyEvent->isAutoRepeat() && PoseShortcutForKey(keyEvent->key()))
     {
-      // Hold-to-sit: K down publishes "sit", K up publishes "stand" again
-      // (unless the active human's sit is currently locked, see Key_Space
-      // below/UpdateSitIntent()). Tracked as plain held-state, same as
-      // Shift/Ctrl/S/J above, so a QML button could read kHeld too.
-      this->kHeldState = pressed;
-      this->kHeldChanged();
-      this->UpdateSitIntent(this->activeHumanIndex);
+      // Hold-to-pose (K = sit, see kPoseShortcuts): pressing publishes that
+      // pose's name, releasing publishes "no pose" again -- unless the
+      // active human has a pose REGISTERED, in which case the registered one
+      // keeps winning (see UpdatePoseIntent()). Tracked as plain held-state,
+      // same as Shift/Ctrl/S/J above, so QML can read heldPose too.
+      const std::string pose =
+          pressed ? PoseShortcutForKey(keyEvent->key())->pose : std::string();
+      if (pose != this->heldPoseState)
+      {
+        this->heldPoseState = pose;
+        this->heldPoseChanged();
+        this->UpdatePoseIntent(this->activeHumanIndex);
+      }
     }
     if (!keyEvent->isAutoRepeat() && !IsTextEditFocused())
     {
-      if (pressed && keyEvent->key() == Qt::Key_Space)
+      if (pressed && keyEvent->key() == Qt::Key_L)
       {
-        // Space toggles the active human's sit lock -- on its own (K never
-        // held) this is enough to sit the human down and keep them seated,
-        // since UpdateSitIntent() publishes "locked OR K held". Pressing it
-        // again releases the lock, same Q_INVOKABLE the QML sit button uses.
-        this->toggleSitLock(this->activeHumanIndex);
+        // L registers the active human's CURRENT pose, so it keeps holding
+        // it once the pose key is released; pressing L again unregisters.
+        // Same Q_INVOKABLE the QML button uses.
+        //
+        // Note this is "register whatever pose is happening now", not "sit"
+        // -- which is why it's a separate key from K rather than a modifier
+        // on it, and why it keeps working unchanged as more poses are added.
+        this->togglePoseLock(this->activeHumanIndex);
       }
       else if (pressed && keyEvent->key() >= Qt::Key_1 && keyEvent->key() <= Qt::Key_9)
       {
@@ -648,17 +690,28 @@ bool HumanControlPanel::JHeld() const
   return this->jHeldState;
 }
 
-bool HumanControlPanel::KHeld() const
+QString HumanControlPanel::HeldPose() const
 {
-  return this->kHeldState;
+  return QString::fromStdString(this->heldPoseState);
 }
 
-bool HumanControlPanel::ActiveSitLocked() const
+QString HumanControlPanel::ActiveLockedPose() const
 {
   if (this->activeHumanIndex < 0 ||
       this->activeHumanIndex >= static_cast<int>(this->humans.size()))
-    return false;
-  return this->humans.at(this->activeHumanIndex).sitLocked;
+    return {};
+  return QString::fromStdString(this->humans.at(this->activeHumanIndex).lockedPose);
+}
+
+QString HumanControlPanel::poseLabel(const QString &_pose) const
+{
+  const std::string pose = _pose.toStdString();
+  for (int i = 0; i < kPoseShortcutCount; ++i)
+  {
+    if (pose == kPoseShortcuts[i].pose)
+      return kPoseShortcuts[i].label;
+  }
+  return kNoPoseLabel;
 }
 
 double HumanControlPanel::JumpHeight() const
@@ -754,9 +807,16 @@ void HumanControlPanel::setActiveHuman(int _index)
     return;
   if (this->activeHumanIndex == _index)
     return;
+  const int previousIndex = this->activeHumanIndex;
   this->activeHumanIndex = _index;
   this->activeHumanChanged();
   this->activeFollowModeChanged();
+  this->activeLockedPoseChanged();
+  // A held pose key only steers the active human (see EffectivePose()), so
+  // handing "対象" over has to republish for both sides: the human losing it
+  // stops holding the key's pose, the one gaining it starts.
+  this->UpdatePoseIntent(previousIndex);
+  this->UpdatePoseIntent(_index);
   // Same auto-focus as a fresh spawn (see PollSpawnConfirmation): jump the
   // camera to a behind/chase view of whichever human just became "対象".
   // This also updates the human's stored viewIndex/viewDistance and fires
@@ -815,16 +875,16 @@ bool HumanControlPanel::isActorModel(int _modelIndex) const
   return IsActorIndex(_modelIndex);
 }
 
-bool HumanControlPanel::isSitCapableModel(int _modelIndex) const
+bool HumanControlPanel::isPoseCapableModel(int _modelIndex) const
 {
-  return IsSitCapableIndex(_modelIndex);
+  return IsPoseCapableIndex(_modelIndex);
 }
 
-bool HumanControlPanel::isSitCapableHumanAt(int _index) const
+bool HumanControlPanel::isPoseCapableHumanAt(int _index) const
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return false;
-  return this->humans.at(_index).sitPublisher.Valid();
+  return this->humans.at(_index).posePublisher.Valid();
 }
 
 QString HumanControlPanel::followModeValue(int _followModeIndex) const
@@ -855,41 +915,69 @@ void HumanControlPanel::setFollowMode(int _index, int _followModeIndex)
       this->FollowModeLabels().value(_followModeIndex) + "」に変更しました");
 }
 
-void HumanControlPanel::toggleSitLock(int _index)
+void HumanControlPanel::togglePoseLock(int _index)
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return;
   auto &human = this->humans.at(_index);
-  if (!human.sitPublisher.Valid())
+  if (!human.posePublisher.Valid())
     return;
 
-  human.sitLocked = !human.sitLocked;
+  if (!human.lockedPose.empty())
+  {
+    // Already registered -- unregister, dropping back to whatever a held key
+    // is asking for right now (nothing, usually, so the human stands up).
+    const QString previous = this->poseLabel(
+        QString::fromStdString(human.lockedPose));
+    human.lockedPose.clear();
+    this->SetStatus(QString::fromStdString(human.name) + " の姿勢登録（" +
+        previous + "）を解除しました");
+  }
+  else
+  {
+    // Register whatever pose is happening right now. Registering the
+    // no-pose (standing) state is allowed and meaningful: it pins the human
+    // upright, so a pose key held afterwards is ignored until it's
+    // unregistered.
+    human.lockedPose = this->EffectivePose(_index);
+    this->SetStatus(QString::fromStdString(human.name) + " の現在の姿勢（" +
+        this->poseLabel(QString::fromStdString(human.lockedPose)) +
+        "）を登録しました");
+  }
   if (_index == this->activeHumanIndex)
-    this->activeSitLockedChanged();
-  this->SetStatus(QString::fromStdString(human.name) +
-      (human.sitLocked ? " の着席を固定しました" : " の着席固定を解除しました"));
-  this->UpdateSitIntent(_index);
+    this->activeLockedPoseChanged();
+  this->UpdatePoseIntent(_index);
 }
 
-void HumanControlPanel::UpdateSitIntent(int _index)
+std::string HumanControlPanel::EffectivePose(int _index) const
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return {};
+  const auto &human = this->humans.at(_index);
+  // Registered wins over held: once a pose is registered with L, this human
+  // holds it regardless of what key the operator is leaning on -- including
+  // a registered "standing", which is how you deliberately stop a human from
+  // responding to K at all.
+  if (!human.lockedPose.empty())
+    return human.lockedPose;
+  // A held key only ever steers the ACTIVE human, same as every other
+  // keyboard shortcut in this panel.
+  if (_index == this->activeHumanIndex)
+    return this->heldPoseState;
+  return {};
+}
+
+void HumanControlPanel::UpdatePoseIntent(int _index)
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return;
   auto &human = this->humans.at(_index);
-  if (!human.sitPublisher.Valid())
+  if (!human.posePublisher.Valid())
     return;
 
-  // Effective intent: locked (Space) OR K currently held. Locking alone
-  // (K never pressed, e.g. from the QML button) is enough to sit; K alone
-  // (no lock) sits only while held; both together behave the same as K
-  // alone until the lock is released, at which point it falls back to
-  // whatever K is doing right then -- see the Q_PROPERTY comments in the
-  // header for the full K+Space design.
-  const bool wantsSit = human.sitLocked ||
-      (_index == this->activeHumanIndex && this->kHeldState);
   gz::msgs::StringMsg message;
-  message.set_data(wantsSit ? "sit" : "stand");
-  human.sitPublisher.Publish(message);
+  message.set_data(this->EffectivePose(_index));
+  human.posePublisher.Publish(message);
 }
 
 bool HumanControlPanel::isHumanActorAt(int _index) const
@@ -1561,10 +1649,10 @@ void HumanControlPanel::PollSpawnConfirmation(
         std::begin(kFollowModeValues), std::end(kFollowModeValues), followModeStd);
     human.followModeIndex = followModeIt != std::end(kFollowModeValues)
         ? static_cast<int>(followModeIt - std::begin(kFollowModeValues)) : 0;
-    if (IsSitCapableIndex(modelIndex))
+    if (IsPoseCapableIndex(modelIndex))
     {
-      const std::string sitTopic = "/" + nameStd + "/cmd_sit";
-      human.sitPublisher = this->node.Advertise<gz::msgs::StringMsg>(sitTopic);
+      const std::string poseTopic = "/" + nameStd + "/cmd_pose";
+      human.posePublisher = this->node.Advertise<gz::msgs::StringMsg>(poseTopic);
     }
   }
   this->humans.push_back(std::move(human));
@@ -1582,6 +1670,7 @@ void HumanControlPanel::PollSpawnConfirmation(
   this->activeHumanIndex = newIndex;
   this->activeHumanChanged();
   this->activeFollowModeChanged();
+  this->activeLockedPoseChanged();
 
   // 人物の初期デフォルト視点は後方追従（kViewBehind）。activeHumanIndex
   // をこの直前に設定しているので、setViewpoint()内のactiveViewIndexChanged()
@@ -1612,6 +1701,7 @@ void HumanControlPanel::removeHuman(int _index)
   this->activeHumanChanged();
   this->activeViewIndexChanged();
   this->activeFollowModeChanged();
+  this->activeLockedPoseChanged();
 
   this->TerminateProcessGroup(human.process);
 

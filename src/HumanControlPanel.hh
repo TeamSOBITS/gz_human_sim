@@ -73,17 +73,19 @@ class HumanControlPanel : public gz::gui::Plugin
   // forward) instead of the default turn-to-face-then-walk. See
   // PressDirectionKey()/the eventFilter() diagonal-key branch.
   Q_PROPERTY(bool jHeld READ JHeld NOTIFY jHeldChanged)
-  // Held state of K -- hold to sit (walking_actor only, see
-  // IsSitCapableIndex() in the .cc): press publishes a "sit" intent on the
-  // active human's sit_topic, release publishes "stand" again unless the
-  // sit is currently locked (see activeSitLocked below). Space toggles the
-  // lock while K is (or was) held -- see eventFilter()/toggleSitLock().
-  Q_PROPERTY(bool kHeld READ KHeld NOTIFY kHeldChanged)
-  // Whether the active human's sit state is currently locked (Space), i.e.
-  // stays seated even after K is released. Mirrors activeFollowModeIndex's
-  // pattern: per-human state (Human::sitLocked), reflected here only for
-  // whichever human is "対象" right now, for the QML toggle button/legend.
-  Q_PROPERTY(bool activeSitLocked READ ActiveSitLocked NOTIFY activeSitLockedChanged)
+  // Which named pose (see kPoseShortcuts in the .cc) the operator is holding
+  // a key down for right now, or "" for none. Currently K = "sit"; the point
+  // of carrying a NAME rather than one bool per pose is that adding a second
+  // pose later is one row in that table plus its clips in the model SDF,
+  // with no new property, signal, or QML binding.
+  Q_PROPERTY(QString heldPose READ HeldPose NOTIFY heldPoseChanged)
+  // The pose the active human has REGISTERED (L key / the panel button):
+  // the pose it holds on its own, without a key being held down, until it's
+  // unregistered. "" means nothing registered. Mirrors
+  // activeFollowModeIndex's pattern: per-human state (Human::lockedPose),
+  // reflected here only for whichever human is "対象" right now, for the QML
+  // button/legend.
+  Q_PROPERTY(QString activeLockedPose READ ActiveLockedPose NOTIFY activeLockedPoseChanged)
   // Jump peak height (meters) used by teleopJump()/the Enter-key shortcut --
   // a global setting like shiftHeld above, not per-human. Adjustable live
   // from the QML slider (setJumpHeight()).
@@ -123,8 +125,8 @@ class HumanControlPanel : public gz::gui::Plugin
   public: bool CtrlHeld() const;
   public: bool SHeld() const;
   public: bool JHeld() const;
-  public: bool KHeld() const;
-  public: bool ActiveSitLocked() const;
+  public: QString HeldPose() const;
+  public: QString ActiveLockedPose() const;
   public: double JumpHeight() const;
   public: double SpeedMultiplier() const;
   public: int ActiveViewIndex() const;
@@ -161,22 +163,32 @@ class HumanControlPanel : public gz::gui::Plugin
   /// follow_mode means nothing for them.
   public: Q_INVOKABLE bool isActorModel(int _modelIndex) const;
 
-  /// \brief Whether a model index has sit_down/sitting/stand_up meshes
-  /// (currently walking_actor only) -- narrower than isActorModel(),
-  /// drives the spawn form's/panel's sit control visibility.
-  public: Q_INVOKABLE bool isSitCapableModel(int _modelIndex) const;
+  /// \brief Whether a model index ships the extra pose clips the named-pose
+  /// feature needs (currently walking_actor only, which is the only one with
+  /// sit_down/sitting/stand_up meshes) -- narrower than isActorModel(),
+  /// drives the spawn form's/panel's pose control visibility.
+  public: Q_INVOKABLE bool isPoseCapableModel(int _modelIndex) const;
 
-  /// \brief Same as isHumanActorAt() but for the sit feature -- whether the
-  /// spawned human at this humanList row can sit (walking_actor only).
-  public: Q_INVOKABLE bool isSitCapableHumanAt(int _index) const;
+  /// \brief Same as isHumanActorAt() but for the named-pose feature --
+  /// whether the spawned human at this humanList row can be posed.
+  public: Q_INVOKABLE bool isPoseCapableHumanAt(int _index) const;
 
-  /// \brief Toggle _index's sit lock (Space key, or the QML sit button):
-  /// on its own (K never held) this alone is enough to make the human sit
-  /// and stay seated, since the effective intent published to sit_topic is
-  /// "locked OR K held" -- see UpdateSitIntent() in the .cc. Pressing it
-  /// again while locked releases the lock, dropping back to whatever K is
-  /// currently doing (stood up, if K also isn't held).
-  public: Q_INVOKABLE void toggleSitLock(int _index);
+  /// \brief Register/unregister _index's current pose (L key, or the QML
+  /// button). Registering pins whatever pose the human is in right now --
+  /// including "standing", which simply means nothing is registered -- so it
+  /// keeps holding it once the pose key is released. Pressing it again
+  /// unregisters, dropping back to whatever a held key is currently asking
+  /// for. See UpdatePoseIntent() in the .cc.
+  ///
+  /// Deliberately "register the current pose" rather than "toggle sitting":
+  /// once there are more poses than sit, one key that means "stay like that"
+  /// keeps working for all of them without needing a lock key each.
+  public: Q_INVOKABLE void togglePoseLock(int _index);
+
+  /// \brief Human-readable label for a pose name ("sit" -> "着席"), for
+  /// status lines and the QML button. Empty name gives the "standing"/no
+  /// pose label.
+  public: Q_INVOKABLE QString poseLabel(const QString &_pose) const;
 
   /// \brief Raw ActorCommandPlugin follow_mode string ("auto"/"path"/
   /// "velocity") for a FollowModeLabels() index, to pass into spawnHuman().
@@ -349,13 +361,13 @@ class HumanControlPanel : public gz::gui::Plugin
     // to, rather than always resetting to "テレオペ".
     gz::transport::Node::Publisher followModePublisher;
     int followModeIndex{0};
-    // Sit/stand intent (setSit_topic) -- only advertised for sit-capable
-    // actor humans (see IsSitCapableIndex()), same as jumpPublisher above.
-    // sitLocked is Space's toggle state: true means this human stays
-    // seated even after K is released -- see UpdateSitIntent()/
-    // toggleSitLock() in the .cc.
-    gz::transport::Node::Publisher sitPublisher;
-    bool sitLocked{false};
+    // Named-pose intent (pose_topic) -- only advertised for pose-capable
+    // actor humans (see IsPoseCapableIndex()), same as jumpPublisher above.
+    // lockedPose is the L key's registered pose: non-empty means this human
+    // holds that pose on its own, with no key held down, until it's
+    // unregistered -- see UpdatePoseIntent()/togglePoseLock() in the .cc.
+    gz::transport::Node::Publisher posePublisher;
+    std::string lockedPose;
     // Bumped by every teleopDirection()/teleopStop() call for this human.
     // "X" schedules a delayed second Twist (see teleopDirection()); that
     // callback only fires if this still matches the value it captured,
@@ -633,13 +645,21 @@ class HumanControlPanel : public gz::gui::Plugin
   /// still pick up a new Ctrl/Shift/J state on their next press.
   private: void RefreshHeldMovementSpeed();
 
-  /// \brief Recomputes _index's effective sit intent (human.sitLocked ||
-  /// kHeldState) and publishes "sit"/"stand" to its sitPublisher. Called
-  /// from eventFilter() on every K press/release and from toggleSitLock()
-  /// -- see the Q_PROPERTY(kHeld)/Q_PROPERTY(activeSitLocked) comments in
-  /// the header for the overall K+Space design. No-op for non-sit-capable
-  /// or non-actor humans (sitPublisher not advertised for those).
-  private: void UpdateSitIntent(int _index);
+  /// \brief Recomputes which pose _index should be holding and publishes its
+  /// name to that human's posePublisher. The effective pose is the
+  /// registered one (Human::lockedPose) if there is one, else whichever pose
+  /// key is currently held -- and a held key only steers the ACTIVE human,
+  /// same as every other keyboard shortcut in this panel.
+  ///
+  /// Called from eventFilter() on every pose-key press/release and from
+  /// togglePoseLock(). No-op for non-pose-capable or non-actor humans
+  /// (posePublisher not advertised for those).
+  private: void UpdatePoseIntent(int _index);
+
+  /// \brief The pose _index should be in right now, per UpdatePoseIntent()'s
+  /// "registered wins over held" rule. Split out because togglePoseLock()
+  /// needs the same answer in order to know what to register.
+  private: std::string EffectivePose(int _index) const;
 
   /// \brief this->speedMultiplierState (the QML slider's baseline) scaled
   /// by kSlowFactor if Ctrl is held, kRunFactor if Shift is held, or 1.0 if
@@ -667,7 +687,10 @@ class HumanControlPanel : public gz::gui::Plugin
   private: bool ctrlHeldState{false};
   private: bool sHeldState{false};
   private: bool jHeldState{false};
-  private: bool kHeldState{false};
+  /// \brief Name of the pose whose hold key is down right now (see
+  /// kPoseShortcuts in the .cc), or empty for none. One string rather than a
+  /// bool per pose so that adding poses needs no new state here.
+  private: std::string heldPoseState;
   private: double jumpHeightState{1.0};
   private: double speedMultiplierState{1.0};
 
@@ -742,8 +765,8 @@ class HumanControlPanel : public gz::gui::Plugin
   signals: void ctrlHeldChanged();
   signals: void sHeldChanged();
   signals: void jHeldChanged();
-  signals: void kHeldChanged();
-  signals: void activeSitLockedChanged();
+  signals: void heldPoseChanged();
+  signals: void activeLockedPoseChanged();
   signals: void jumpHeightChanged();
   signals: void speedMultiplierChanged();
 };

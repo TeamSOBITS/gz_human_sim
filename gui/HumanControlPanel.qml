@@ -529,27 +529,37 @@ Rectangle {
       }
     }
 
-    // ── Sit (walking_actor only) ───────────────────────────
-    // Mouse equivalent of holding K / K+Space: toggling this button alone
-    // is enough to sit the active human down and keep them seated (locked),
-    // same as pressing Space without ever touching K -- see
-    // HumanControlPanel::UpdateSitIntent().
+    // ── 姿勢（walking_actorのみ） ──────────────────────────
+    // Lキーのマウス版。押している間だけのポーズキー（K＝着席）とは別に、
+    // 「いまの姿勢を登録」して押しっぱなしをやめても保持させるボタン。
+    // 現在の姿勢そのものを登録する方式なので、今後ポーズが増えても
+    // このボタンとLキーは変更なしでそのまま使える
+    // -- HumanControlPanel::togglePoseLock()を参照。
     Rectangle {
       Layout.fillWidth: true; height: 1; color: "#c7d8d4"
       visible: HumanControlPanel.activeHumanIndex >= 0 &&
-          HumanControlPanel.isSitCapableHumanAt(HumanControlPanel.activeHumanIndex)
+          HumanControlPanel.isPoseCapableHumanAt(HumanControlPanel.activeHumanIndex)
     }
     RowLayout {
       Layout.fillWidth: true
       spacing: 8
       visible: HumanControlPanel.activeHumanIndex >= 0 &&
-          HumanControlPanel.isSitCapableHumanAt(HumanControlPanel.activeHumanIndex)
-      Label { text: "着席"; color: "#183b37"; font.bold: true }
+          HumanControlPanel.isPoseCapableHumanAt(HumanControlPanel.activeHumanIndex)
+      Label { text: "姿勢"; color: "#183b37"; font.bold: true }
+      Label {
+        // 「いま何をしているか」＝登録済みならそれ、なければ押されている
+        // ポーズキーのもの。登録の有無はボタン側のラベルが示す。
+        text: HumanControlPanel.poseLabel(
+            HumanControlPanel.activeLockedPose !== ""
+                ? HumanControlPanel.activeLockedPose : HumanControlPanel.heldPose)
+        color: "#536b67"
+      }
       Button {
-        id: sitLockButton
+        id: poseLockButton
         Layout.fillWidth: true
-        text: HumanControlPanel.activeSitLocked ? "立たせる（固定解除）" : "座らせる（固定）"
-        onClicked: HumanControlPanel.toggleSitLock(HumanControlPanel.activeHumanIndex)
+        text: HumanControlPanel.activeLockedPose !== ""
+            ? "姿勢の登録を解除" : "現在の姿勢を登録"
+        onClicked: HumanControlPanel.togglePoseLock(HumanControlPanel.activeHumanIndex)
       }
     }
 
@@ -767,11 +777,12 @@ Rectangle {
     Label {
       Layout.fillWidth: true
       visible: HumanControlPanel.activeHumanIndex >= 0 &&
-          HumanControlPanel.isSitCapableHumanAt(HumanControlPanel.activeHumanIndex)
-      text: "Kを押している間だけ座ります（離すと立ちます）。Kを押しながら" +
-          "Spaceを押すと座ったまま固定され、Kを離しても座り続けます。" +
-          "もう一度Spaceを押すと固定を解除して立ちます（上の「座らせる」" +
-          "ボタンでも同じ操作ができます）。"
+          HumanControlPanel.isPoseCapableHumanAt(HumanControlPanel.activeHumanIndex)
+      text: "Kを押している間だけ座ります（離すと立ちます）。Lを押すと" +
+          "そのときの姿勢が登録され、Kを離しても保持されます。" +
+          "もう一度Lを押すと登録を解除します（上の「現在の姿勢を登録」" +
+          "ボタンでも同じ操作ができます）。立ったままLを押せば直立で" +
+          "固定され、Kを押しても座らなくなります。"
       color: "#7b928d"
       font.pixelSize: 11
       wrapMode: Text.Wrap
