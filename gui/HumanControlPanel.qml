@@ -22,7 +22,6 @@ Rectangle {
   color: "#eef4f2"
 
   property int selectedModelIndex: 0
-  property string spawnName: HumanControlPanel.defaultName(0)
   property int selectedPoseIndex: 0
   property int selectedFollowModeIndex: 0
   property int selectedPathTemplateIndex: 0
@@ -71,7 +70,11 @@ Rectangle {
       }
     }
 
-    // ── Spawn ──────────────────────────────────────────────
+    // ── 人物をspawn ────────────────────────────────────────
+    // 1人でも複数人でも、座標指定でもクリック指定でも、ここ1か所で完結する
+    // （以前は「人物をspawn」と「まとめてspawn」で別フォーム・別ボタンだった）。
+    // 違いは「どこに置くか」だけなので、モデル/ポーズ/動作モード/名前/z/yaw の
+    // 指定は共通のまま、配置方法だけを下で選ぶ形にしている。
     Label { text: "人物をspawn"; color: "#183b37"; font.bold: true }
 
     Label { text: "モデル"; color: "#536b67" }
@@ -93,7 +96,6 @@ Rectangle {
       }
       onActivated: {
         selectedModelIndex = currentIndex
-        spawnName = HumanControlPanel.defaultName(currentIndex)
         zField.text = HumanControlPanel.defaultZ(currentIndex).toFixed(2)
       }
     }
@@ -136,19 +138,83 @@ Rectangle {
       onActivated: selectedFollowModeIndex = currentIndex
     }
 
-    Row {
+    // 名前は常に「ベース名＋通し番号」（human1, human2, ...）。1人だけの
+    // ときも同じ規則なので、あとから人数を増やしても命名がぶれない。
+    RowLayout {
       Layout.fillWidth: true
       spacing: 8
-      Label { text: "名前"; width: 40; anchors.verticalCenter: parent.verticalCenter; color: "#536b67" }
+      Label { text: "名前"; color: "#536b67" }
       TextField {
         id: nameField
-        width: parent.width - 48
-        text: spawnName
-        onTextEdited: spawnName = text
-        placeholderText: "human1"
+        Layout.fillWidth: true
+        text: "human"
+        placeholderText: "human"
+      }
+      Label { text: "→ " + nameField.text + "1, 2, …"; color: "#7b928d"; font.pixelSize: 10 }
+    }
+
+    // ── 配置方法 ───────────────────────────────────────────
+    // ①座標指定（人数ぶんを自動でグリッド配置）と ②3Dビュークリック
+    // （クリックした数だけ、その場所ぴったりに配置）の2択。②で地点を
+    // 選んでいる間は人数はクリック数で決まるので、人数欄は隠す。
+    //
+    // 2つのRadioButtonの「checked」を別々の式で計算していると、両方が真に
+    // なりうる瞬間ができてしまい（座標指定側は常にtrue固定、クリック側は
+    // 地点を1つでも選ぶとtrueになるため）両方選択済みに見えるボタンに
+    // なっていた。single source of truth（このplacingByClick 1つ）から
+    // 両方のcheckedを導くことで、常にどちらか一方だけがcheckedになる。
+    property bool placingByClick: false
+    Label { text: "配置方法"; color: "#536b67" }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      RadioButton {
+        id: placeByCoordRadio
+        text: "座標指定"
+        checked: !root.placingByClick
+        onToggled: if (checked) {
+          root.placingByClick = false
+          HumanControlPanel.setSpawnPicking(false)
+          HumanControlPanel.clearSpawnPoints()
+        }
+      }
+      RadioButton {
+        id: placeByClickRadio
+        text: "3Dビューでクリック"
+        checked: root.placingByClick
+        onToggled: if (checked) {
+          root.placingByClick = true
+          HumanControlPanel.setSpawnPicking(true)
+        }
+      }
+    }
+    // 地点を1つでもクリックしたら、座標指定に戻さなくてもクリック側の
+    // 表示に自動で切り替える（従来の「両方checked」を避けつつ、クリックで
+    // 選び始めた操作の流れは維持する）。
+    Connections {
+      target: HumanControlPanel
+      function onPendingSpawnPointsChanged() {
+        if (HumanControlPanel.pendingSpawnPoints.length > 0)
+          root.placingByClick = true
+      }
+      function onSpawnPickingChanged() {
+        root.placingByClick = HumanControlPanel.spawnPicking ||
+            HumanControlPanel.pendingSpawnPoints.length > 0
       }
     }
 
+    // ① 座標指定
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      visible: !placeByClickRadio.checked
+      Label { text: "人数"; color: "#536b67" }
+      SpinBox { id: countSpin; from: 1; to: 50; value: 1; editable: true }
+      Label {
+        text: countSpin.value > 1 ? "（" + countSpin.value + "人を自動整列）" : ""
+        color: "#7b928d"; font.pixelSize: 10
+      }
+    }
     // x/yはspawnされるたびnextSpawnX/Y()で自動更新し、既定値のまま連続spawn
     // しても人物同士が同じ座標に重ならないようにする(z/yawは固定のまま)。
     Connections {
@@ -160,6 +226,7 @@ Rectangle {
     }
     GridLayout {
       Layout.fillWidth: true
+      visible: !placeByClickRadio.checked
       columns: 4
       columnSpacing: 6
       Label { text: "x"; color: "#536b67" }
@@ -174,6 +241,73 @@ Rectangle {
         text: HumanControlPanel.nextSpawnY().toFixed(2)
         Layout.fillWidth: true
       }
+    }
+
+    // ② 3Dビュークリック
+    Button {
+      Layout.fillWidth: true
+      visible: placeByClickRadio.checked
+      text: HumanControlPanel.spawnPicking
+          ? "スポーン地点選択モード: ON（クリックした数だけ配置）"
+          : "スポーン地点選択モードを開始"
+      checkable: true
+      checked: HumanControlPanel.spawnPicking
+      contentItem: Text {
+        text: parent.text
+        color: "white"
+        horizontalAlignment: Text.AlignHCenter
+        verticalAlignment: Text.AlignVCenter
+        wrapMode: Text.Wrap
+      }
+      background: Rectangle {
+        radius: 6
+        color: HumanControlPanel.spawnPicking ? "#e65100" : "#78909c"
+      }
+      onClicked: HumanControlPanel.setSpawnPicking(!HumanControlPanel.spawnPicking)
+    }
+    Label {
+      Layout.fillWidth: true
+      visible: placeByClickRadio.checked
+      text: "選択中の地点: " + HumanControlPanel.pendingSpawnPoints.length + "地点" +
+          (HumanControlPanel.pendingSpawnPoints.length > 0
+              ? "（この数だけ人物が配置されます）" : "")
+      color: "#536b67"
+      font.pixelSize: 11
+    }
+    ListView {
+      Layout.fillWidth: true
+      visible: placeByClickRadio.checked &&
+          HumanControlPanel.pendingSpawnPoints.length > 0
+      Layout.preferredHeight: Math.min(Math.max(contentHeight, 20), 90)
+      clip: true
+      model: HumanControlPanel.pendingSpawnPoints
+      delegate: Label {
+        text: (index + 1) + ": (" + modelData + ")"
+        color: "#536b67"
+        font.pixelSize: 11
+      }
+    }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      visible: placeByClickRadio.checked &&
+          HumanControlPanel.pendingSpawnPoints.length > 0
+      Button {
+        Layout.fillWidth: true
+        text: "1点取り消し"
+        onClicked: HumanControlPanel.undoLastSpawnPoint()
+      }
+      Button {
+        Layout.fillWidth: true
+        text: "クリア"
+        onClicked: HumanControlPanel.clearSpawnPoints()
+      }
+    }
+
+    GridLayout {
+      Layout.fillWidth: true
+      columns: 4
+      columnSpacing: 6
       Label { text: "z"; color: "#536b67" }
       TextField {
         id: zField
@@ -186,7 +320,13 @@ Rectangle {
 
     Button {
       Layout.fillWidth: true
-      text: "Spawn"
+      text: placeByClickRadio.checked
+          ? (HumanControlPanel.pendingSpawnPoints.length > 0
+              ? "選択した" + HumanControlPanel.pendingSpawnPoints.length + "地点にSpawn"
+              : "Spawn（先に地点をクリックしてください）")
+          : (countSpin.value > 1 ? "Spawn（" + countSpin.value + "人）" : "Spawn")
+      enabled: !placeByClickRadio.checked ||
+          HumanControlPanel.pendingSpawnPoints.length > 0
       contentItem: Text {
         text: parent.text
         color: "white"
@@ -196,10 +336,12 @@ Rectangle {
       }
       background: Rectangle {
         radius: 6
-        color: parent.pressed ? "#2e7d32" : "#43a047"
+        color: parent.enabled ? (parent.pressed ? "#2e7d32" : "#43a047") : "#b0bec5"
       }
-      onClicked: HumanControlPanel.spawnHuman(
-          selectedModelIndex, nameField.text,
+      // 地点が選ばれていればそちらが優先され、人数・x/yは無視される
+      // （HumanControlPanel::spawnHumans()）。QML側で分岐する必要はない。
+      onClicked: HumanControlPanel.spawnHumans(
+          selectedModelIndex, nameField.text, countSpin.value,
           HumanControlPanel.isCustomHuman(selectedModelIndex)
               ? HumanControlPanel.posePresets[selectedPoseIndex] : "",
           HumanControlPanel.isActorModel(selectedModelIndex)
@@ -254,6 +396,14 @@ Rectangle {
 
           RowLayout {
             Layout.fillWidth: true
+            // その人物のスポーンマーカーと同じ色の四角。3Dビュー上のどの円が
+            // この行の人物のものかを、色だけで対応付けられるようにする。
+            Rectangle {
+              width: 12; height: 12; radius: 3
+              color: HumanControlPanel.spawnMarkerColorAt(index)
+              border.color: "#7b928d"
+              border.width: 1
+            }
             Label {
               text: (HumanControlPanel.activeHumanIndex === index ? "⌨ " : "") + modelData
               Layout.fillWidth: true
@@ -288,17 +438,55 @@ Rectangle {
           // からhumansChanged()経由で読み直すのは、「全員表示にする」など
           // 他の経路でC++側が変わったときにボタンの表示がずれないように
           // するため（表示中なのにラベルが「表示」のまま、を防ぐ）。
-          Button {
-            id: collisionToggleButton
-            property bool shown: HumanControlPanel.showCollisionAt(humanRow.humanIndex)
-            visible: HumanControlPanel.isHumanActorAt(humanRow.humanIndex)
-            text: shown ? "当たり判定を非表示" : "当たり判定を表示"
-            onClicked: HumanControlPanel.setShowCollision(humanRow.humanIndex, !shown)
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            Button {
+              id: collisionToggleButton
+              property bool shown: HumanControlPanel.showCollisionAt(humanRow.humanIndex)
+              visible: HumanControlPanel.isHumanActorAt(humanRow.humanIndex)
+              text: shown ? "当たり判定を非表示" : "当たり判定を表示"
+              onClicked: HumanControlPanel.setShowCollision(humanRow.humanIndex, !shown)
+              Connections {
+                target: HumanControlPanel
+                function onHumansChanged() {
+                  collisionToggleButton.shown =
+                      HumanControlPanel.showCollisionAt(humanRow.humanIndex)
+                }
+              }
+            }
+            // この人物ひとりぶんのスポーンマーカー表示切替。全員分の一括切替は
+            // 下の「初期スポーンマーカー」セクション。collisionToggleButtonと
+            // 同じく、押した状態を自前で持たずC++側を読み直すことで、一括操作で
+            // 変わったときもラベルがずれないようにしている。
+            Button {
+              id: markerToggleButton
+              property bool shown: HumanControlPanel.showSpawnMarkerAt(humanRow.humanIndex)
+              text: shown ? "マーカー非表示" : "マーカー表示"
+              onClicked: HumanControlPanel.setShowSpawnMarker(humanRow.humanIndex, !shown)
+              Connections {
+                target: HumanControlPanel
+                function onHumansChanged() {
+                  markerToggleButton.shown =
+                      HumanControlPanel.showSpawnMarkerAt(humanRow.humanIndex)
+                }
+              }
+            }
+          }
+
+          // 経路（下の「経路」セクション）を適用する対象かどうか。spawn直後は
+          // ONなので、「何人かspawnして経路を描いて歩かせる」だけならここを
+          // 触る必要はない。特定の人物だけ別の動きをさせたいときに外す。
+          CheckBox {
+            id: routeTargetCheck
+            checked: HumanControlPanel.routeTargetAt(humanRow.humanIndex)
+            text: "経路対象"
+            onToggled: HumanControlPanel.setRouteTarget(humanRow.humanIndex, checked)
             Connections {
               target: HumanControlPanel
               function onHumansChanged() {
-                collisionToggleButton.shown =
-                    HumanControlPanel.showCollisionAt(humanRow.humanIndex)
+                routeTargetCheck.checked =
+                    HumanControlPanel.routeTargetAt(humanRow.humanIndex)
               }
             }
           }
@@ -363,6 +551,44 @@ Rectangle {
               }
             }
           }
+        }
+      }
+    }
+
+    // ── 初期スポーンマーカー ────────────────────────────────
+    // 各人物が最初にspawnされた地点に置かれる、その人物専用の色付きの円。
+    // シミュレーション上のオブジェクトではなく描画だけのビジュアルなので
+    // （HumanControlPanel::ApplySpawnMarkers()）、当たり判定も質量も持たず、
+    // 誰かの通行を邪魔したりスポーン判定に引っかかったりすることはない。
+    // 個別の表示切替は人物リストの各行のボタン、ここは全員まとめて。
+    Rectangle { Layout.fillWidth: true; height: 1; color: "#c7d8d4" }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      Label { text: "初期スポーンマーカー"; color: "#183b37"; font.bold: true }
+      Item { Layout.fillWidth: true }
+      // 「全員表示にする / 全員非表示にする」の1ボタン式は当たり判定の一括
+      // ボタンと同じ方式（状態が揃っていないときは、まず揃う方を出す）。
+      Button {
+        id: markerAllToggleButton
+        property bool allShown: false
+        function resync() {
+          var any = false
+          var all = true
+          for (var i = 0; i < HumanControlPanel.humanList.length; ++i) {
+            any = true
+            if (!HumanControlPanel.showSpawnMarkerAt(i))
+              all = false
+          }
+          allShown = any && all
+        }
+        Component.onCompleted: resync()
+        enabled: HumanControlPanel.humanList.length > 0
+        text: allShown ? "全員非表示にする" : "全員表示にする"
+        onClicked: HumanControlPanel.setShowSpawnMarkerAll(!allShown)
+        Connections {
+          target: HumanControlPanel
+          function onHumansChanged() { markerAllToggleButton.resync() }
         }
       }
     }
@@ -670,14 +896,66 @@ Rectangle {
       }
     }
 
-    // ── Path templates ─────────────────────────────────────
-    // Same "対象" (activeHumanIndex) as the viewpoint block above -- one
-    // global control, not one per row. New shapes only ever need a new
-    // entry in HumanControlPanel.pathTemplateLabels/sendPathTemplate(), so
-    // this combo grows automatically as gz_human_sim gains more of them;
-    // nothing here needs to change.
+    // ── 経路（複数人にまとめて歩かせる）─────────────────────
+    // 経路の「作り方」が2通り（3Dビュークリック／テンプレート図形）あるだけで、
+    // できあがる経由点リストは1つに統合されている。どちらで作っても同じ一覧に
+    // 並び、同じ「1点取り消し/クリア」で直せて、同じボタンで同じ対象人物へ
+    // 適用される ―― 以前はテンプレートだけが別経路で、1人へ即送信され、
+    // SFM/往復の設定も無視されていた。
+    //
+    // 対象は人物リスト各行の「経路対象」チェック（spawn直後はON）。複数人に
+    // チェックが入っていれば、同じ経路をその全員へ一度に適用する。
     Rectangle { Layout.fillWidth: true; height: 1; color: "#c7d8d4" }
-    Label { text: "経路テンプレート"; color: "#183b37"; font.bold: true }
+    RowLayout {
+      Layout.fillWidth: true
+      Label { text: "経路"; color: "#183b37"; font.bold: true; Layout.fillWidth: true }
+      Label {
+        text: "対象 " + HumanControlPanel.routeTargetCount + "人"
+        color: "#536b67"; font.pixelSize: 11
+      }
+    }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      Button {
+        Layout.fillWidth: true
+        text: "全員を対象にする"
+        enabled: HumanControlPanel.humanList.length > 0
+        onClicked: HumanControlPanel.setAllRouteTargets(true)
+      }
+      Button {
+        Layout.fillWidth: true
+        text: "対象を全解除"
+        enabled: HumanControlPanel.humanList.length > 0
+        onClicked: HumanControlPanel.setAllRouteTargets(false)
+      }
+    }
+
+    // ① 3Dビュークリックで作る
+    Label { text: "① 3Dビューをクリックして作る"; color: "#536b67"; font.pixelSize: 11 }
+    Button {
+      Layout.fillWidth: true
+      text: HumanControlPanel.routeRecording
+          ? "経路登録モード: ON（クリックが経由点になります）"
+          : "経路登録モードを開始（クリックが経由点になります）"
+      checkable: true
+      checked: HumanControlPanel.routeRecording
+      contentItem: Text {
+        text: parent.text
+        color: "white"
+        horizontalAlignment: Text.AlignHCenter
+        verticalAlignment: Text.AlignVCenter
+        wrapMode: Text.Wrap
+      }
+      background: Rectangle {
+        radius: 6
+        color: HumanControlPanel.routeRecording ? "#e65100" : "#78909c"
+      }
+      onClicked: HumanControlPanel.setRouteRecording(!HumanControlPanel.routeRecording)
+    }
+
+    // ② テンプレート図形で作る
+    Label { text: "② テンプレート図形で作る"; color: "#536b67"; font.pixelSize: 11 }
     RowLayout {
       Layout.fillWidth: true
       spacing: 4
@@ -685,7 +963,6 @@ Rectangle {
       ComboBox {
         id: pathTemplateCombo
         Layout.fillWidth: true
-        enabled: HumanControlPanel.activeHumanIndex >= 0
         model: HumanControlPanel.pathTemplateLabels
         currentIndex: selectedPathTemplateIndex
         onActivated: selectedPathTemplateIndex = currentIndex
@@ -724,16 +1001,163 @@ Rectangle {
       }
       Button {
         Layout.fillWidth: true
-        text: "この経路で歩かせる"
-        enabled: HumanControlPanel.activeHumanIndex >= 0
-        onClicked: HumanControlPanel.sendPathTemplate(
-            HumanControlPanel.activeHumanIndex, pathTemplateCombo.currentIndex,
+        text: "この図形で経由点を生成"
+        onClicked: HumanControlPanel.generatePathTemplate(
+            pathTemplateCombo.currentIndex,
             parseFloat(pathCenterXField.text) || 0.0,
             parseFloat(pathCenterYField.text) || 0.0,
             parseFloat(pathSizeField.text) || 2.0,
             parseInt(pathWaypointsField.text) || 12,
             pathClockwiseCheck.checked)
       }
+    }
+
+    // できあがった経由点（①②共通）
+    Label {
+      text: "経由点（" + HumanControlPanel.pendingRoutePoints.length + "点）"
+      color: "#536b67"; font.pixelSize: 11
+    }
+    ListView {
+      Layout.fillWidth: true
+      Layout.preferredHeight: Math.min(Math.max(contentHeight, 20), 100)
+      clip: true
+      model: HumanControlPanel.pendingRoutePoints
+      delegate: Label {
+        text: (index + 1) + ": (" + modelData + ")"
+        color: "#536b67"
+        font.pixelSize: 11
+      }
+    }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      visible: HumanControlPanel.pendingRoutePoints.length > 0
+      Button {
+        Layout.fillWidth: true
+        text: "1点取り消し"
+        onClicked: HumanControlPanel.undoLastRoutePoint()
+      }
+      Button {
+        Layout.fillWidth: true
+        text: "クリア"
+        onClicked: HumanControlPanel.clearPendingRoute()
+      }
+    }
+
+    // 歩かせ方
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 4
+      Label { text: "歩き方"; color: "#536b67" }
+      ComboBox {
+        id: sfmModeCombo
+        Layout.fillWidth: true
+        model: ["単純パス追従（回避なし・既定）", "SFM（自動回避）"]
+        Component.onCompleted: currentIndex = HumanControlPanel.useSfm ? 1 : 0
+        onActivated: HumanControlPanel.setUseSfm(currentIndex === 1)
+      }
+    }
+    // SFMはワールド側にSfmCrowdSystemが読み込まれている必要がある。
+    // 入っていないワールドで選ぶと登録が誰にも届かず、確定しても人が
+    // 動かない（これが「経路を確定しても歩かない」の原因だった）ので、
+    // 選んだ時点で警告する。
+    Label {
+      Layout.fillWidth: true
+      visible: sfmModeCombo.currentIndex === 1 && !HumanControlPanel.sfmAvailable
+      text: "⚠ このワールドにはSFM（自動回避）システムが読み込まれていません。" +
+          "このままでは経路を確定しても動きません。「単純パス追従」を選んでください" +
+          "（SFMを使う場合はワールド側にSfmCrowdSystemプラグインが必要です）。"
+      color: "#e65100"
+      font.pixelSize: 11
+      wrapMode: Text.Wrap
+    }
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      CheckBox {
+        id: cyclicRouteCheck
+        text: "往復（終点まで来たら折り返す）"
+        Component.onCompleted: checked = HumanControlPanel.cyclicRoute
+        onToggled: HumanControlPanel.setCyclicRoute(checked)
+      }
+    }
+    // 障害物回避（グローバル経路計画）。ONだと、クリックした経由点の
+    // 「間」を壁や家具を避けて通るように経路が引き直されてから送信される
+    // （src/nav_grid_system.cpp）。OFFだと点と点を直線で結ぶので、間に
+    // 何かあれば突っ込む。人物の当たり判定の半径ぶん膨らませた地図上で
+    // 探索するので、体が通れない隙間には経路が引かれない。
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      CheckBox {
+        id: avoidObstaclesCheck
+        text: "障害物を避ける経路にする"
+        Component.onCompleted: checked = HumanControlPanel.avoidObstacles
+        onToggled: HumanControlPanel.setAvoidObstacles(checked)
+      }
+    }
+    Label {
+      Layout.fillWidth: true
+      visible: avoidObstaclesCheck.checked && !HumanControlPanel.avoidObstaclesAvailable
+      text: "⚠ このワールドには経路プランナ（NavGridSystem）が読み込まれていません。" +
+          "このままだと経由点を直線で結ぶだけになります。ワールドのSDFに " +
+          "gz_human_nav_grid_system プラグインを追加してください。"
+      color: "#e65100"
+      font.pixelSize: 11
+      wrapMode: Text.Wrap
+    }
+    Button {
+      Layout.fillWidth: true
+      text: "この経路で歩かせる（対象 " + HumanControlPanel.routeTargetCount + "人）"
+      enabled: HumanControlPanel.pendingRoutePoints.length > 0 &&
+          HumanControlPanel.humanList.length > 0
+      contentItem: Text {
+        text: parent.text
+        color: "white"
+        font.bold: true
+        horizontalAlignment: Text.AlignHCenter
+        verticalAlignment: Text.AlignVCenter
+      }
+      background: Rectangle {
+        radius: 6
+        color: parent.enabled ? (parent.pressed ? "#2e7d32" : "#43a047") : "#b0bec5"
+      }
+      onClicked: HumanControlPanel.confirmRoute()
+    }
+    // SFMで走らせた人物を手動操作へ戻すためのスイッチ。経路そのものは
+    // 消えないので、もう一度有効にすれば続きから巡回を再開する。
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
+      visible: sfmModeCombo.currentIndex === 1
+      Button {
+        Layout.fillWidth: true
+        text: "対象のSFMを有効化"
+        onClicked: HumanControlPanel.setSfmEnabledForTargets(true)
+      }
+      Button {
+        Layout.fillWidth: true
+        text: "対象を手動操作へ戻す"
+        onClicked: HumanControlPanel.setSfmEnabledForTargets(false)
+      }
+    }
+    Connections {
+      target: HumanControlPanel
+      function onRouteSettingsChanged() {
+        sfmModeCombo.currentIndex = HumanControlPanel.useSfm ? 1 : 0
+        cyclicRouteCheck.checked = HumanControlPanel.cyclicRoute
+        avoidObstaclesCheck.checked = HumanControlPanel.avoidObstacles
+      }
+    }
+    Label {
+      Layout.fillWidth: true
+      text: "単純パス追従は回避なしで経由点を直進します（軽い・どのワールドでも動く）。" +
+          "SFM（自動回避）は他の人物・ロボット・壁を避けながら巡回します" +
+          "（自然だが重く、ワールド側にSfmCrowdSystemが必要）。" +
+          "経路を歩けるのは walking_actor / DoctorFemaleWalk だけです。"
+      color: "#7b928d"
+      font.pixelSize: 11
+      wrapMode: Text.Wrap
     }
 
     Label {

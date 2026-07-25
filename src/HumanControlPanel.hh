@@ -48,10 +48,10 @@ class HumanControlPanel : public gz::gui::Plugin
   // see kFollowModeValues in HumanControlPanel.cc -- but still works as a
   // spawn_human.launch.py follow_mode:= argument for anyone who wants it.
   Q_PROPERTY(QStringList followModeLabels READ FollowModeLabels CONSTANT)
-  // Labels for the global "経路テンプレート" combo (see sendPathTemplate()).
+  // Labels for the global "経路テンプレート" combo (see generatePathTemplate()).
   // A maintained list here, same pattern as humanModels/viewpointLabels/
   // followModeLabels above -- add one label + one case in
-  // sendPathTemplate()'s switch whenever scripts/path_template.py grows a
+  // generatePathTemplate()'s switch whenever scripts/path_template.py grows a
   // new --shape, rather than trying to auto-discover shapes from the
   // filesystem at runtime.
   Q_PROPERTY(QStringList pathTemplateLabels READ PathTemplateLabels CONSTANT)
@@ -109,6 +109,64 @@ class HumanControlPanel : public gz::gui::Plugin
   // runtime (setFollowMode()) and shows whichever mode is actually active
   // for the current "対象" human, not just what was picked at spawn time.
   Q_PROPERTY(int activeFollowModeIndex READ ActiveFollowModeIndex NOTIFY activeFollowModeChanged)
+  // Crowd/SFM feature set (see SfmCrowdSystem in src/sfm_crowd_system.cpp):
+  // batch-spawning a crowd, recording a route by clicking in the 3D view,
+  // and choosing per-human whether that route is driven by the Social
+  // Force Model (avoids other humans/robots/walls, registered with
+  // SfmCrowdSystem over gz-transport -- see EnsureSfmPublishers()) or by
+  // the existing plain path-follow (cmd_path, no avoidance -- the same
+  // mechanism sendWaypoint() already uses).
+  //
+  // routeRecording and spawnPicking below are the two click modes. Exactly
+  // one of them can be on at a time (turning either on turns the other
+  // off), and while BOTH are off a left click in the 3D view does nothing
+  // at all -- which is the point of having modes: ordinary clicking,
+  // selecting and camera work in the viewport must stay usable, and a panel
+  // that silently turned every stray click into a spawn point made that
+  // impossible.
+  Q_PROPERTY(bool routeRecording READ RouteRecording NOTIFY routeRecordingChanged)
+  // "x, y" strings for the not-yet-confirmed route, in click order -- the
+  // QML list showing what's been placed so far. The route is now GLOBAL
+  // (one route, applied to every human ticked as a route target) rather
+  // than a separate list per human: a route drawn by clicking is nearly
+  // always meant for "these N background people walk this corridor", and
+  // making each human own a private copy meant re-clicking the same
+  // corridor once per person. See routeTargetAt()/setRouteTarget().
+  Q_PROPERTY(QStringList pendingRoutePoints READ PendingRoutePoints NOTIFY pendingRouteChanged)
+  // How the confirmed route is driven, also global now for the same reason
+  // as pendingRoutePoints above (they only take effect at confirmRoute()
+  // time, so per-human copies bought nothing).
+  Q_PROPERTY(bool useSfm READ UseSfm NOTIFY routeSettingsChanged)
+  Q_PROPERTY(bool cyclicRoute READ CyclicRoute NOTIFY routeSettingsChanged)
+  // Whether confirmRoute() runs the route through NavGridSystem's global
+  // planner first (see src/nav_grid_system.cpp), turning the straight legs
+  // between clicked points into legs that go AROUND walls and furniture.
+  // Without it the route is sent exactly as drawn, and any leg crossing an
+  // obstacle walks the human into it -- ActorCommandPlugin's waypoint
+  // follower steers straight at the next point and has no notion of what is
+  // in between. avoidObstaclesAvailable mirrors sfmAvailable: the planner
+  // lives in a world plugin, so a world that doesn't load it can't offer it.
+  Q_PROPERTY(bool avoidObstacles READ AvoidObstacles NOTIFY routeSettingsChanged)
+  Q_PROPERTY(bool avoidObstaclesAvailable READ AvoidObstaclesAvailable NOTIFY routeSettingsChanged)
+  // Per-human runtime switch (not a route setting): whether the active
+  // human's SfmCrowdSystem commands are currently allowed to drive it.
+  Q_PROPERTY(bool activeSfmEnabled READ ActiveSfmEnabled NOTIFY sfmModeChanged)
+  // Whether the world actually has an SfmCrowdSystem loaded (detected by
+  // looking for a subscriber on the register topic -- see
+  // SfmSystemAvailable()). Worlds that don't load it, which is most of them
+  // (only gz_human_sim's own sfm_crowd_demo.world does), silently swallowed
+  // every SFM route registration: the panel published, nothing subscribed,
+  // and the human just stood there. The QML uses this to warn instead.
+  Q_PROPERTY(bool sfmAvailable READ SfmAvailable NOTIFY routeSettingsChanged)
+  // How many spawned humans are currently ticked as route targets -- drives
+  // the QML's "N人に適用" button label/enabled state.
+  Q_PROPERTY(int routeTargetCount READ RouteTargetCount NOTIFY humansChanged)
+  // Spawn-point picking: same 3D-view-click mechanism as routeRecording
+  // above, but for choosing WHERE the next humans get created. Points
+  // ACCUMULATE (one per click) so a single Spawn press can create a whole
+  // group, each person at their own clicked spot -- see spawnHumans().
+  Q_PROPERTY(bool spawnPicking READ SpawnPicking NOTIFY spawnPickingChanged)
+  Q_PROPERTY(QStringList pendingSpawnPoints READ PendingSpawnPoints NOTIFY pendingSpawnPointsChanged)
 
   public: HumanControlPanel();
   public: ~HumanControlPanel() override;
@@ -132,6 +190,17 @@ class HumanControlPanel : public gz::gui::Plugin
   public: int ActiveViewIndex() const;
   public: double ActiveViewDistance() const;
   public: int ActiveFollowModeIndex() const;
+  public: bool RouteRecording() const;
+  public: QStringList PendingRoutePoints() const;
+  public: bool ActiveSfmEnabled() const;
+  public: bool UseSfm() const;
+  public: bool CyclicRoute() const;
+  public: bool SfmAvailable() const;
+  public: bool AvoidObstacles() const;
+  public: bool AvoidObstaclesAvailable() const;
+  public: int RouteTargetCount() const;
+  public: bool SpawnPicking() const;
+  public: QStringList PendingSpawnPoints() const;
 
   /// \brief Suggested spawn name for a model index ("human1", "human2", …).
   public: Q_INVOKABLE QString defaultName(int _modelIndex) const;
@@ -236,13 +305,18 @@ class HumanControlPanel : public gz::gui::Plugin
   /// on that side needs to know this happened.
   public: Q_INVOKABLE void applyCollisionSize(int _index, double _radius, double _length);
 
-  /// \brief _followMode is only meaningful when isActorModel(_modelIndex)
-  /// is true; ignored (may be empty) for static models. Raw ActorCommandPlugin
-  /// value from followModeValue(), typically "auto" or "path" -- see
+  /// \brief Spawns exactly one human, at exactly (_x, _y). The single-person
+  /// primitive every spawnHumans() layout ends up calling, kept public
+  /// because it's also the natural entry point for anything scripted.
+  ///
+  /// _followMode is only meaningful when isActorModel(_modelIndex) is true;
+  /// ignored (may be empty) for static models. Raw ActorCommandPlugin value
+  /// from followModeValue(), typically "auto" or "path" -- see
   /// FollowModeLabels() for the QML-facing labels in the same order.
   public: Q_INVOKABLE void spawnHuman(
       int _modelIndex, const QString &_name, const QString &_posePreset,
       const QString &_followMode, double _x, double _y, double _z, double _yaw);
+
   public: Q_INVOKABLE void removeHuman(int _index);
   public: Q_INVOKABLE void teleopMove(
       int _index, double _linear, double _lateral, double _angular);
@@ -305,18 +379,128 @@ class HumanControlPanel : public gz::gui::Plugin
 
   public: Q_INVOKABLE void sendWaypoint(int _index, double _x, double _y);
 
-  /// \brief Compute and publish a canned-shape path (see
-  /// PathTemplateLabels()) directly to human _index's cmd_path, the same
-  /// way sendWaypoint() sends a single point -- no subprocess, no ROS
-  /// bridge involved (unlike scripts/path_template.py, the standalone CLI
-  /// version of the same shapes, meant for headless/scripted use outside
-  /// the GUI). _centerX/_centerY are world coordinates; _size is the
-  /// radius for the circle template or the side length for the square
-  /// one; _numWaypoints only applies to the circle (square is always its
-  /// 4 corners).
-  public: Q_INVOKABLE void sendPathTemplate(
-      int _index, int _templateIndex, double _centerX, double _centerY,
+  /// \brief Toggles route-recording mode (routeRecording). While on, every
+  /// LeftClickToScene event (see eventFilter()) appends a point to the
+  /// pending route; while off, the same click picks a spawn point instead
+  /// (see the pendingSpawnPoints Q_PROPERTY).
+  public: Q_INVOKABLE void setRouteRecording(bool _enabled);
+
+  /// \brief Turns spawn-point picking on/off. While on, every
+  /// LeftClickToScene appends a spawn point; turning it on turns route
+  /// recording off (see the routeRecording Q_PROPERTY for why the two click
+  /// modes are exclusive, and why "neither" has to remain a valid state).
+  public: Q_INVOKABLE void setSpawnPicking(bool _enabled);
+
+  /// \brief Removes the last clicked spawn point / discards all of them.
+  /// Same pair of edits undoLastRoutePoint()/clearPendingRoute() offer for
+  /// the route, since both lists are built the same way (by clicking).
+  public: Q_INVOKABLE void undoLastSpawnPoint();
+  public: Q_INVOKABLE void clearSpawnPoints();
+
+  /// \brief The one way to create humans, whether that's one person or a
+  /// crowd, at typed coordinates or at clicked ones -- what used to be
+  /// spawnHuman()/spawnCrowd()/spawnAtPickedPoints() as three separate
+  /// entry points with three separate forms in the panel.
+  ///
+  /// Where each person goes:
+  ///  - picked spawn points present -> one person per point, exactly where
+  ///    it was clicked, and _count/_x/_y are ignored (the clicks already
+  ///    said both how many and where). The points are consumed.
+  ///  - otherwise -> _count people laid out on the kSpawnGridSpacing grid
+  ///    starting at (_x, _y), pre-separated so their individual spawn-safety
+  ///    probes don't have to push each other apart.
+  ///
+  /// Naming is always _baseName + a running number continuing past whoever
+  /// already exists (human1, human2, ...), so a second batch never collides
+  /// with the first. Every person still goes through the same single-spawn
+  /// path (name-collision check, spawn-safety probe), so this only decides
+  /// how many and where.
+  public: Q_INVOKABLE void spawnHumans(
+      int _modelIndex, const QString &_baseName, int _count,
+      const QString &_posePreset, const QString &_followMode,
+      double _x, double _y, double _z, double _yaw);
+
+  /// \brief Show/hide the spawn marker of one human, or of all of them.
+  /// The marker is a flat coloured disc drawn at the position that human
+  /// was originally spawned at -- purely a render-scene visual (see
+  /// ApplySpawnMarkers()), never a simulation entity, so it has no
+  /// collision, no mass, and never shows up in the entity tree or in a
+  /// spawn-safety probe's way. Each human gets its own colour so a group of
+  /// them can be told apart at a glance.
+  public: Q_INVOKABLE void setShowSpawnMarker(int _index, bool _value);
+  public: Q_INVOKABLE void setShowSpawnMarkerAll(bool _value);
+  public: Q_INVOKABLE bool showSpawnMarkerAt(int _index) const;
+
+  /// \brief "#rrggbb" of _index's spawn-marker colour, so the QML row can
+  /// show the same colour swatch the 3D view draws.
+  public: Q_INVOKABLE QString spawnMarkerColorAt(int _index) const;
+
+  /// \brief Discards the not-yet-confirmed route (start over) / removes just
+  /// its last clicked point (undo a misplaced click). Global now -- there is
+  /// one route shared by every route target, see the pendingRoutePoints
+  /// Q_PROPERTY.
+  public: Q_INVOKABLE void clearPendingRoute();
+  public: Q_INVOKABLE void undoLastRoutePoint();
+
+  /// \brief Whether human _index is one of the route targets: the set of
+  /// humans confirmRoute() sends the pending route to. Newly spawned humans
+  /// start ticked, so the common "spawn a few, draw one route, press go"
+  /// flow needs no per-human ticking at all; untick the ones that should
+  /// keep doing something else.
+  public: Q_INVOKABLE bool routeTargetAt(int _index) const;
+  public: Q_INVOKABLE void setRouteTarget(int _index, bool _value);
+  public: Q_INVOKABLE void setAllRouteTargets(bool _value);
+
+  /// \brief true = drive the confirmed route through SfmCrowdSystem (avoids
+  /// other humans/robots/walls, but only works in a world that actually
+  /// loads that system -- see sfmAvailable); false = through the plain
+  /// cmd_path follow (no avoidance, works in every world). Only affects what
+  /// the NEXT confirmRoute() does; switching it afterwards does not
+  /// retroactively convert an already-confirmed route -- confirm again.
+  public: Q_INVOKABLE void setUseSfm(bool _value);
+
+  /// \brief Whether the route loops back to its first point (SfmCrowdSystem's
+  /// cyclicGoals / a true patrol) or stops once the last point is reached.
+  /// Applies to the NEXT confirmRoute() call, same as setUseSfm() above.
+  public: Q_INVOKABLE void setCyclicRoute(bool _value);
+
+  /// \brief Turn collision-aware planning on/off for the next confirmRoute().
+  public: Q_INVOKABLE void setAvoidObstacles(bool _value);
+
+  /// \brief Only meaningful once _index has a route confirmed under SFM
+  /// mode: publishes Boolean _value on that human's sfm_enable_topic (see
+  /// SfmCrowdSystem), the same switch that lets a human be handed back to
+  /// manual teleop without SfmCrowdSystem's own commands fighting it.
+  public: Q_INVOKABLE void setSfmEnabled(int _index, bool _value);
+
+  /// \brief setSfmEnabled() for every current route target at once.
+  public: Q_INVOKABLE void setSfmEnabledForTargets(bool _value);
+
+  /// \brief Replaces the pending route with a canned shape (see
+  /// PathTemplateLabels()) instead of publishing it straight to one human.
+  /// Feeding the templates into the same pending route the 3D-view clicks
+  /// build means both ways of making a route end at the same one "walk it"
+  /// button, for the same multi-human target set -- previously the template
+  /// button published immediately, to exactly one human, through a
+  /// completely separate path that ignored the SFM/cyclic settings.
+  /// _centerX/_centerY are world coordinates; _size is the radius for the
+  /// circle template or the side length for the square one; _numWaypoints
+  /// only applies to the circle (the square is always its 4 corners).
+  public: Q_INVOKABLE void generatePathTemplate(
+      int _templateIndex, double _centerX, double _centerY,
       double _size, int _numWaypoints, bool _clockwise);
+
+  /// \brief Sends the pending route to every route target, in whichever mode
+  /// useSfm currently selects: registered with SfmCrowdSystem
+  /// (register_topic) or published as a plain cmd_path waypoint sequence.
+  /// Does not clear the pending route afterward -- confirm again after
+  /// adding/undoing points to update it in place.
+  ///
+  /// Also makes sure each target is actually *able* to walk it: a human left
+  /// in "経路専用" follow mode with SFM off, or one whose sfm_enable was
+  /// switched off earlier, would otherwise accept the route and then just
+  /// stand there, which is what "経路を確定しても歩かない" was.
+  public: Q_INVOKABLE void confirmRoute();
 
   /// \brief Point the GUI camera at a spawned human. _viewIndex matches
   /// ViewpointLabels()'s order: 0 = free camera, then chase/front/side/
@@ -411,6 +595,36 @@ class HumanControlPanel : public gz::gui::Plugin
     // match models/human_collision_body/model.sdf's own spawn-time values.
     double collisionRadius{0.25};
     double collisionLength{1.2};
+
+    // Crowd/SFM feature set -- see the Q_PROPERTY block's comment at the
+    // top of this class. The route itself and the useSfm/cyclicRoute
+    // settings are global now (one route applied to every ticked target);
+    // what stays per-human is whether this human is one of those targets,
+    // and sfmEnabled, which mirrors whatever this panel last published on
+    // sfmEnablePublisher -- kept here (rather than re-deriving it) purely
+    // so ActiveSfmEnabled() can show the right toggle state without an
+    // extra round trip.
+    bool routeTarget{true};
+    bool sfmEnabled{true};
+    gz::transport::Node::Publisher sfmEnablePublisher;
+
+    // Spawn marker (see setShowSpawnMarker()/ApplySpawnMarkers()): where
+    // this human was originally spawned, the colour its marker is drawn in,
+    // and the same "desired vs. applied" pair ApplyCollisionVisibility()
+    // uses -- appliedShowSpawnMarker is a tri-state int (-1 = nothing
+    // applied yet) for the same reason appliedShowCollision is.
+    //
+    // markerVisual is the render-scene visual itself, created lazily on the
+    // render thread and owned here so removeHuman() can queue exactly that
+    // one for destruction. Shown by default: the whole point of the marker
+    // is to see where people started without having to ask for it.
+    double spawnX{0.0};
+    double spawnY{0.0};
+    double spawnZ{0.0};
+    int markerColorIndex{0};
+    bool showSpawnMarker{true};
+    int appliedShowSpawnMarker{-1};
+    gz::rendering::VisualPtr markerVisual;
   };
 
   /// \brief Pending camera command, written on the Qt thread by
@@ -758,11 +972,135 @@ class HumanControlPanel : public gz::gui::Plugin
   /// this feature existed.
   private: std::string collisionBodyTemplate;
 
+  /// \brief Advertises sfmRegisterPublisher/sfmUnregisterPublisher on first
+  /// use (not in the constructor: worldName isn't known yet there, and
+  /// these topics are fixed/global rather than per-world, but deferring
+  /// keeps every other transport setup in this class the same "lazy,
+  /// first-use" shape). See SfmCrowdSystem's own register_topic/
+  /// unregister_topic SDF defaults, which these must match.
+  private: void EnsureSfmPublishers();
+
+  /// \brief Builds and publishes the register_human payload sending the
+  /// pending route to human _index -- see SfmCrowdSystem::ParseRegistration()
+  /// for the exact wire format this must match.
+  private: void SendSfmRegistration(int _index);
+
+  /// \brief Publishes the pending route to _index as a plain cmd_path
+  /// waypoint sequence -- no SfmCrowdSystem involvement, so
+  /// ActorCommandPlugin's ordinary (non-avoiding) path-follow drives it.
+  private: void SendSimplePath(int _index);
+
+  /// \brief Whether anything is subscribed to the SFM register topic, i.e.
+  /// whether this world actually loaded an SfmCrowdSystem. Queried through
+  /// gz-transport's own discovery (Node::TopicInfo()'s subscriber list)
+  /// rather than assumed: most worlds don't load that system, and in those
+  /// an SFM registration is published into the void, which is exactly why a
+  /// confirmed route used to leave everyone standing still.
+  private: bool SfmSystemAvailable();
+
+  /// \brief Whether NavGridSystem's planning service is being offered by this
+  /// world, cached into avoidObstaclesAvailableState.
+  private: bool NavPlannerAvailable();
+
+  /// \brief Runs _route through NavGridSystem's planner, returning the
+  /// collision-free version. Falls back to _route unchanged (returning false)
+  /// whenever the planner isn't there or can't answer, so a route is always
+  /// sent -- an unplanned route that walks into a table is still better than
+  /// a button that silently does nothing.
+  private: bool PlanAroundObstacles(
+      const std::vector<std::pair<double, double>> &_route,
+      double _bodyRadius,
+      std::vector<std::pair<double, double>> &_planned);
+
+  /// \brief The humans confirmRoute() should act on: every one ticked as a
+  /// route target, or -- if none are -- just the active human, so the
+  /// button still does the obvious thing before anyone has touched a
+  /// tickbox.
+  private: std::vector<int> RouteTargetIndices() const;
+
+  /// \brief Render-thread only, called from the same eventFilter() Render
+  /// branch as ApplyViewpoint(): creates each human's spawn-marker visual
+  /// on first sight and pushes its desired visibility, plus a marker for
+  /// each not-yet-spawned picked spawn point. Purely render-scene objects
+  /// (Visual + Material, no ECM entity), so they can never collide with
+  /// anything, be picked up by a spawn-safety probe, or appear in the
+  /// entity tree -- see setShowSpawnMarker().
+  private: void ApplySpawnMarkers();
+
+  /// \brief Creates one flat coloured disc visual named _name at
+  /// (_x, _y), or nullptr if the scene won't build it.
+  private: gz::rendering::VisualPtr CreateMarkerVisual(
+      const gz::rendering::ScenePtr &_scene, const std::string &_name,
+      double _x, double _y, int _colorIndex, bool _pending) const;
+
+  /// \brief Finds (and caches) the GUI user camera in _scene. Render thread
+  /// only. Split out of ApplyViewpoint() so the per-frame camera-position
+  /// cache below can be kept up to date even when no viewpoint command is
+  /// pending.
+  private: bool EnsureUserCamera(const gz::rendering::ScenePtr &_scene);
+
+  private: gz::transport::Node::Publisher sfmRegisterPublisher;
+  private: gz::transport::Node::Publisher sfmUnregisterPublisher;
+  /// \brief Global route-recording toggle -- see the routeRecording
+  /// Q_PROPERTY's comment.
+  private: bool routeRecordingState{false};
+  /// \brief The other click mode -- see the routeRecording Q_PROPERTY.
+  private: bool spawnPickingState{false};
+
+  /// \brief The one shared route every route target walks, and how it is
+  /// driven -- see the pendingRoutePoints/useSfm Q_PROPERTY comments.
+  private: std::vector<std::pair<double, double>> pendingRoute;
+  private: bool useSfmState{false};
+  private: bool cyclicRouteState{true};
+
+  /// \brief Cached result of SfmSystemAvailable(), refreshed on demand
+  /// rather than every frame (gz-transport discovery is a network query).
+  private: bool sfmAvailableState{false};
+  private: bool avoidObstaclesState{true};
+  private: bool avoidObstaclesAvailableState{false};
+  /// \brief The route actually sent by the last confirmRoute() -- the planned
+  /// one when obstacle avoidance is on, so the QML can show how many points
+  /// the planner produced from the handful that were clicked.
+  private: std::vector<std::pair<double, double>> lastSentRoute;
+
+  /// \brief Spawn points picked by clicking the 3D view, awaiting a Spawn
+  /// press -- see the pendingSpawnPoints Q_PROPERTY's comment.
+  private: std::vector<std::pair<double, double>> pendingSpawnPoints;
+
+  /// \brief Render-scene visuals for pendingSpawnPoints (rebuilt whenever
+  /// the list length changes) and the names of markers whose human has been
+  /// removed, queued here on the Qt thread for ApplySpawnMarkers() to
+  /// actually destroy on the render thread.
+  private: std::vector<gz::rendering::VisualPtr> pendingSpawnMarkerVisuals;
+  /// \brief Set on every pendingSpawnPoints edit; ApplySpawnMarkers()
+  /// rebuilds the pending markers and clears it. See its own comment for
+  /// why a size comparison isn't enough.
+  private: bool pendingSpawnMarkersDirty{false};
+  private: std::mutex markerMutex;
+  private: std::vector<std::string> markerRemovalQueue;
+
+  /// \brief Last known GUI camera XY, refreshed every Render event. The
+  /// spawn-safety probe walks in from the camera's side (see
+  /// ProbeSafeSpawnPosition()): the operator clicked that point, so the
+  /// line of sight to it is by definition unobstructed, which makes it the
+  /// one approach direction guaranteed not to be blocked by the very
+  /// furniture the probe is trying to test around.
+  private: std::mutex cameraPosMutex;
+  private: double cameraX{0.0};
+  private: double cameraY{0.0};
+  private: bool cameraPosValid{false};
+
   signals: void humansChanged();
   signals: void StatusChanged();
   signals: void activeHumanChanged();
   signals: void activeViewIndexChanged();
   signals: void activeFollowModeChanged();
+  signals: void routeRecordingChanged();
+  signals: void pendingRouteChanged();
+  signals: void pendingSpawnPointsChanged();
+  signals: void spawnPickingChanged();
+  signals: void routeSettingsChanged();
+  signals: void sfmModeChanged();
   signals: void shiftHeldChanged();
   signals: void ctrlHeldChanged();
   signals: void sHeldChanged();

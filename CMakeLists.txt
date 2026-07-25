@@ -19,6 +19,7 @@ find_package(gz-transport13 REQUIRED)
 find_package(gz-gui8 REQUIRED)
 find_package(gz-rendering8 REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Core)
+find_package(Boost REQUIRED)
 
 add_library(gz_human_actor_animation_control SHARED
   src/actor_animation_control_plugin.cpp
@@ -32,6 +33,37 @@ add_library(gz_human_actor_command SHARED
   src/actor_command_plugin.cpp
 )
 target_link_libraries(gz_human_actor_command
+  gz-plugin2::gz-plugin2
+  gz-sim8::gz-sim8
+  gz-msgs10::gz-msgs10
+  gz-transport13::gz-transport13
+)
+
+# lightsfm (third_party/lightsfm) is vendored directly into this package --
+# see third_party/lightsfm/README.md -- rather than depended on as a
+# separate colcon package, so this builds standalone if the sibling
+# lightsfm/sfm_for_gazebo clones this was developed alongside are removed.
+add_library(gz_human_sfm_crowd_system SHARED
+  src/sfm_crowd_system.cpp
+)
+target_include_directories(gz_human_sfm_crowd_system PRIVATE
+  third_party/lightsfm/include
+)
+target_link_libraries(gz_human_sfm_crowd_system
+  gz-plugin2::gz-plugin2
+  gz-sim8::gz-sim8
+  gz-msgs10::gz-msgs10
+  gz-transport13::gz-transport13
+  Boost::boost
+)
+
+# Collision-aware global path planner (occupancy grid + inflation + A*),
+# mirroring the Nav2 layering sobits_navigation_stack uses for the robots --
+# see the file header for the layer-by-layer correspondence.
+add_library(gz_human_nav_grid_system SHARED
+  src/nav_grid_system.cpp
+)
+target_link_libraries(gz_human_nav_grid_system
   gz-plugin2::gz-plugin2
   gz-sim8::gz-sim8
   gz-msgs10::gz-msgs10
@@ -71,6 +103,8 @@ install(PROGRAMS
 install(TARGETS
   gz_human_actor_animation_control
   gz_human_actor_command
+  gz_human_sfm_crowd_system
+  gz_human_nav_grid_system
   DESTINATION lib
 )
 
@@ -86,6 +120,7 @@ install(DIRECTORY
   models
   rviz
   scripts
+  worlds
   DESTINATION share/${PROJECT_NAME}
 )
 

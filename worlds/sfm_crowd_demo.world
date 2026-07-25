@@ -1,0 +1,139 @@
+<?xml version="1.0" ?>
+<!--
+  Minimal flat-floor demo world for gz_human_sim's SfmCrowdSystem plugin
+  (see src/sfm_crowd_system.cpp). Ground plane / sun / physics / the
+  standard gz-sim system plugin set below are copied verbatim from
+  gz-sim8's own worlds/empty.sdf: once a world SDF declares even one
+  <plugin>, gz-sim stops auto-loading its default system set, so
+  Physics/UserCommands/SceneBroadcaster/Contact have to be listed
+  explicitly here alongside SfmCrowdSystem.
+
+  Lays out a simple 5 m-wide corridor (two wall_segment obstacles, y=-2.5
+  and y=+2.5) along the X axis and three <human> entries with fixed,
+  cyclic goals that cross each other's paths, so the crowd's mutual
+  avoidance is visible without any extra setup. Each <human> here is only
+  the SFM-side half of a human -- the human itself (its collision body and
+  walking_actor) is spawned separately, by launch/sfm_crowd_demo.launch.py
+  calling the existing spawn_human.launch.py once per namespace (human1/
+  human2/human3), matching the collision_model/cmd_vel_topic names used
+  below. See that launch file and this package's README for the full
+  build/run/verify walkthrough.
+-->
+<sdf version="1.6">
+  <world name="sfm_crowd_demo">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin
+      filename="gz-sim-contact-system"
+      name="gz::sim::systems::Contact">
+    </plugin>
+
+    <!-- SFM crowd controller: see src/sfm_crowd_system.cpp for the SDF
+         schema this reads (desired_velocity/agent_radius/obstacle_range,
+         repeated wall_segment/robot_model/human blocks). -->
+    <plugin
+      filename="libgz_human_sfm_crowd_system.so"
+      name="gz_human_sim::SfmCrowdSystem">
+      <desired_velocity>1.0</desired_velocity>
+      <agent_radius>0.35</agent_radius>
+      <obstacle_range>6.0</obstacle_range>
+
+      <!-- Corridor walls, x in [-4, 13]. -->
+      <wall_segment>
+        <p1><x>-4.0</x><y>-2.5</y></p1>
+        <p2><x>13.0</x><y>-2.5</y></p2>
+      </wall_segment>
+      <wall_segment>
+        <p1><x>-4.0</x><y>2.5</y></p1>
+        <p2><x>13.0</x><y>2.5</y></p2>
+      </wall_segment>
+
+      <!-- Walks the corridor lengthwise, hugging -y, and back. -->
+      <human>
+        <collision_model>human1_collision</collision_model>
+        <cmd_vel_topic>/human1/cmd_vel</cmd_vel_topic>
+        <sfm_enable_topic>/human1/sfm_enable</sfm_enable_topic>
+        <cyclic_goals>true</cyclic_goals>
+        <goal><x>10.0</x><y>-1.0</y><radius>0.4</radius></goal>
+        <goal><x>-2.0</x><y>-1.0</y><radius>0.4</radius></goal>
+      </human>
+
+      <!-- Walks the same corridor the opposite direction, hugging +y --
+           crosses human1 near the middle. -->
+      <human>
+        <collision_model>human2_collision</collision_model>
+        <cmd_vel_topic>/human2/cmd_vel</cmd_vel_topic>
+        <sfm_enable_topic>/human2/sfm_enable</sfm_enable_topic>
+        <cyclic_goals>true</cyclic_goals>
+        <goal><x>-2.0</x><y>1.0</y><radius>0.4</radius></goal>
+        <goal><x>10.0</x><y>1.0</y><radius>0.4</radius></goal>
+      </human>
+
+      <!-- Crosses the corridor side to side, cutting across both of the
+           above. -->
+      <human>
+        <collision_model>human3_collision</collision_model>
+        <cmd_vel_topic>/human3/cmd_vel</cmd_vel_topic>
+        <sfm_enable_topic>/human3/sfm_enable</sfm_enable_topic>
+        <cyclic_goals>true</cyclic_goals>
+        <goal><x>4.0</x><y>-1.8</y><radius>0.4</radius></goal>
+        <goal><x>4.0</x><y>1.8</y><radius>0.4</radius></goal>
+      </human>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.8 0.8 0.8 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

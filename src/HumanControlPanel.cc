@@ -34,6 +34,8 @@
 #include <gz/msgs/twist.pb.h>
 #include <gz/plugin/Register.hh>
 #include <gz/rendering/Camera.hh>
+#include <gz/rendering/Geometry.hh>
+#include <gz/rendering/Material.hh>
 #include <gz/rendering/RenderingIface.hh>
 #include <gz/rendering/Scene.hh>
 #include <gz/rendering/Visual.hh>
@@ -80,7 +82,7 @@ static const char *const kFollowModeValues[] = {"auto", "path"};
 static constexpr int kFollowModeCount =
     static_cast<int>(sizeof(kFollowModeValues) / sizeof(kFollowModeValues[0]));
 
-// Path templates sendPathTemplate() can generate, index-matched with
+// Path templates generatePathTemplate() can generate, index-matched with
 // PathTemplateLabels(); keep this in sync with scripts/path_template.py's
 // --shape choices (that script is the standalone-CLI version of the same
 // shapes; this one publishes straight to gz-transport for the GUI button
@@ -111,8 +113,21 @@ static constexpr int kSpawnGridColumns = 4;
 // vs. "got stopped partway by something".
 static constexpr int kSpawnSafetyMaxAttempts = 8;
 static constexpr double kSpawnProbeSpeed = 1.0;
-static constexpr int kSpawnSafetySettleMs = 2200;
-static constexpr double kSpawnSafetyDisplacementMeters = 0.3;
+static constexpr int kSpawnSafetySettleMs = 1400;
+static constexpr double kSpawnSafetyDisplacementMeters = 0.25;
+
+// How far the probe walks in toward the candidate before its position is
+// judged. This used to be a full kSpawnGridSpacing (1.2 m), which meant the
+// test really asked "is the 1.2 m corridor leading to this point clear?" --
+// so a clicked spot with a table 1 m to one side got rejected and the human
+// was quietly moved somewhere else, reading as "it never spawns where I
+// clicked". Keeping the walk-in short makes the test local to the point
+// itself: a clear point is accepted on the very first attempt (no
+// displacement at all), and only genuine overlap pushes the search outward.
+// It still has to be a walk-in rather than a bare drop -- a capsule simply
+// dropped into a wall interpenetrates symmetrically and just sits there
+// instead of being pushed out, so standing still proves nothing.
+static constexpr double kSpawnProbeApproach = 0.45;
 
 // PollProbeRemoval(): how often to re-check whether a just-removed probe
 // is actually gone (QueryEntityExists()), and how many times to check
@@ -135,6 +150,56 @@ static constexpr unsigned int kStateQueryTimeoutMs = 800u;
 // ticks (the companion model may take a few frames to actually appear
 // after being spawned/respawned).
 static constexpr int kCollisionVisualMaxRetries = 600;
+
+// NavGridSystem's planning service (see src/nav_grid_system.cpp's
+// plan_service SDF default, which this must match) and how long to wait for
+// it. Planning is a one-shot A* over an already-built grid, so it answers in
+// milliseconds; the generous timeout is only for the first call after world
+// load, when the grid may still be being rasterised.
+static const char *const kNavPlanService = "/gz_human_sim/nav/plan_path";
+static constexpr unsigned int kNavPlanTimeoutMs = 3000u;
+
+// Spawn-marker palette (see setShowSpawnMarker()/ApplySpawnMarkers()):
+// one colour per human, assigned in spawn order and wrapping around, so a
+// group of people spawned together can be told apart by their markers.
+// Deliberately saturated and well separated in hue rather than a smooth
+// ramp -- these are identity labels, not a scale.
+static const double kMarkerColors[][3] = {
+  {0.95, 0.26, 0.21},  // red
+  {0.13, 0.59, 0.95},  // blue
+  {0.30, 0.69, 0.31},  // green
+  {1.00, 0.76, 0.03},  // amber
+  {0.61, 0.15, 0.69},  // purple
+  {0.00, 0.74, 0.83},  // cyan
+  {1.00, 0.44, 0.00},  // orange
+  {0.91, 0.12, 0.39},  // pink
+};
+static constexpr int kMarkerColorCount =
+    static_cast<int>(sizeof(kMarkerColors) / sizeof(kMarkerColors[0]));
+
+// Spawn-marker disc geometry: a cylinder squashed flat and laid just above
+// the floor, wide enough to read as "a person starts here" from the default
+// overview camera without hiding the person standing on it.
+static constexpr double kMarkerRadius = 0.12;
+static constexpr double kMarkerThickness = 0.03;
+static constexpr double kMarkerZ = 0.02;
+// Not-yet-spawned picked points are drawn in the same shape but neutral
+// white and more transparent -- they aren't anybody's marker yet.
+static constexpr double kMarkerAlpha = 0.75;
+static constexpr double kPendingMarkerAlpha = 0.45;
+
+// kHumanModelDefaultZ[] for a model NAME rather than an index -- used by
+// setViewpoint()'s first-person case, which only has Human::model (a
+// string) to work from. 1.0 (the walking_actor/person_standing/
+// custom_human default) if the name isn't recognised, same fallback
+// defaultZ() itself uses.
+static double DefaultZForModelName(const std::string &_model)
+{
+  const auto it = std::find(std::begin(kHumanModels), std::end(kHumanModels), _model);
+  if (it == std::end(kHumanModels))
+    return 1.0;
+  return kHumanModelDefaultZ[it - std::begin(kHumanModels)];
+}
 
 static bool IsActorIndex(int _index)
 {
@@ -291,10 +356,29 @@ static const char *const kViewpointLabels[kViewCount] = {
   "自由視点", "一人称（本人視点）", "後方追従", "前方から", "右横から", "左横から",
   "俯瞰（真上）", "右奥上から（斜め上）", "左奥上から（斜め上）",
 };
-// Eye height for kViewFirstPerson -- walking_actor/DoctorFemaleWalk are
-// human-scale (roughly 1.6-1.8m), unlike guide_robot's robots, so this
-// differs from GuiderRobotManager::setViewpoint()'s equivalent value.
+// ABSOLUTE eye height above the ground for kViewFirstPerson (roughly
+// standing human eye level), unlike guide_robot's robots, so this differs
+// from GuiderRobotManager::setViewpoint()'s equivalent value.
+//
+// This is not simply added to the actor's own world Z as a followOffset:
+// spawn_human.launch.py's -z places each model's ENTITY ORIGIN at
+// defaultZ(modelIndex) (see kHumanModelDefaultZ), which for walking_actor/
+// person_standing/custom_human is 1.0 -- already close to head height, not
+// ground level -- because those models' own mesh origin sits partway up the
+// body. DoctorFemaleWalk's origin is at 0.0 (ground level) instead. Naively
+// adding a flat 1.6 m on top of an origin already at 1.0 m put the first-
+// person camera at 2.6 m, floating well above the character's actual head.
+// setViewpoint() now subtracts that model's own defaultZ from this before
+// using it, so the offset means "how much higher than THIS model's origin
+// the eyes are", landing at the same ~1.6 m absolute height for every model
+// regardless of where each one's origin happens to sit.
 static constexpr double kEyeHeight = 1.6;
+
+// Floor for the computed offset above -- even if a future model's own
+// defaultZ were placed above eye height (making the raw subtraction negative
+// or implausibly small), the first-person camera should still sit a
+// sensible distance above whatever entity Z it's following.
+static constexpr double kMinEyeOffset = 0.2;
 
 // How eagerly the chase camera (SetFollowTarget/SetTrackTarget's pgain)
 // catches up to the human's current world position each frame. The
@@ -376,20 +460,23 @@ void HumanControlPanel::LoadConfig(const tinyxml2::XMLElement *)
     this->collisionBodyTemplate = buffer.str();
   }
 
-  // Viewpoint commands touch the Ogre2 scene, which is only safe from the
-  // render thread; watch Render events like GuiderRobotManager does. Render
-  // events are only ever sent to MainWindow, so a filter there is enough
-  // for that.
-  auto *mainWindow = gz::gui::App()->findChild<gz::gui::MainWindow *>();
-  if (mainWindow)
-    mainWindow->installEventFilter(this);
-
-  // QWEASDZXC keyboard teleop needs real key events, which target whichever
-  // QQuickItem currently has focus (e.g. the 3D scene), not MainWindow --
-  // installing on the Application object itself instead catches every
-  // event application-wide (QApplication is the one QObject whose
-  // installEventFilter() acts globally rather than per-object), so the
-  // shortcuts work no matter which panel/item is focused.
+  // A single application-wide filter covers everything eventFilter() needs:
+  // Render and LeftClickToScene (both only ever sent to MainWindow) as well
+  // as the QWEASDZXC keyboard shortcuts (which target whichever QQuickItem
+  // currently has focus, e.g. the 3D scene, not MainWindow). Installing on
+  // the Application object -- the one QObject whose installEventFilter()
+  // acts application-wide rather than per-object -- reaches all of them.
+  //
+  // This used to ALSO install a second filter directly on MainWindow ("Render
+  // events are only ever sent to MainWindow, so a filter there is enough for
+  // that"), which was true but redundant: MainWindow is exactly the kind of
+  // object the Application-wide filter already covers. Since Qt calls every
+  // installed filter for a given event (global ones first, then the target
+  // object's own), that second filter didn't watch anything the first one
+  // missed -- it just ran eventFilter() a second time for every event
+  // MainWindow received, which for Render was harmless (ApplyViewpoint() et
+  // al. are idempotent) but for LeftClickToScene meant every single click
+  // appended two identical spawn/route points instead of one.
   gz::gui::App()->installEventFilter(this);
 
   this->DiscoverWorld();
@@ -401,6 +488,44 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
   {
     this->ApplyViewpoint();
     this->ApplyCollisionVisibility();
+    this->ApplySpawnMarkers();
+  }
+  else if (_event->type() == gz::gui::events::LeftClickToScene::kType)
+  {
+    // Route-recording mode (setRouteRecording()): every left click resolved
+    // to a 3D scene point becomes one waypoint of whichever human is
+    // currently activeHumanIndex -- same "targets whatever is 対象 right
+    // now" convention the movement keys already use, not a separate
+    // per-row selection of its own. Silently does nothing when
+    // routeRecordingState is off, so this never steals an ordinary
+    // camera-orbit click.
+    auto *clickEvent = static_cast<gz::gui::events::LeftClickToScene *>(_event);
+    const auto point = clickEvent->Point();
+    if (this->routeRecordingState)
+    {
+      // Route recording appends to the one shared route (see the
+      // pendingRoutePoints Q_PROPERTY) -- no longer tied to whichever human
+      // happens to be 対象, since the route is applied to a whole set of
+      // them at confirmRoute() time.
+      this->pendingRoute.emplace_back(point.X(), point.Y());
+      this->pendingRouteChanged();
+      this->SetStatus(QString("経由点を追加しました: (%1, %2)")
+          .arg(point.X(), 0, 'f', 2).arg(point.Y(), 0, 'f', 2));
+    }
+    else if (this->spawnPickingState)
+    {
+      // Points accumulate so one Spawn press can create a whole group, each
+      // person where they were clicked.
+      this->pendingSpawnPoints.emplace_back(point.X(), point.Y());
+      this->pendingSpawnMarkersDirty = true;
+      this->pendingSpawnPointsChanged();
+      this->SetStatus(QString("スポーン地点%1: (%2, %3)")
+          .arg(this->pendingSpawnPoints.size())
+          .arg(point.X(), 0, 'f', 2).arg(point.Y(), 0, 'f', 2));
+    }
+    // Neither mode on: deliberately does nothing, leaving ordinary clicking
+    // in the viewport (selection, camera work) alone -- see the
+    // routeRecording Q_PROPERTY's comment.
   }
   else if (_event->type() == QEvent::KeyPress || _event->type() == QEvent::KeyRelease)
   {
@@ -617,7 +742,7 @@ void HumanControlPanel::OnPoseInfo(const gz::msgs::Pose_V &_message)
     {
       const double travelled = std::hypot(
           cached.x - probeIt->second.startX, cached.y - probeIt->second.startY);
-      if (travelled >= kSpawnGridSpacing && probeIt->second.publisher)
+      if (travelled >= kSpawnProbeApproach && probeIt->second.publisher)
       {
         probeIt->second.publisher->Publish(gz::msgs::Twist());
         probeIt->second.stopped = true;
@@ -799,6 +924,143 @@ int HumanControlPanel::ActiveFollowModeIndex() const
       this->activeHumanIndex >= static_cast<int>(this->humans.size()))
     return 0;
   return this->humans.at(this->activeHumanIndex).followModeIndex;
+}
+
+bool HumanControlPanel::RouteRecording() const
+{
+  return this->routeRecordingState;
+}
+
+QStringList HumanControlPanel::PendingRoutePoints() const
+{
+  QStringList result;
+  for (const auto &point : this->pendingRoute)
+  {
+    result << QString("%1, %2")
+        .arg(point.first, 0, 'f', 2).arg(point.second, 0, 'f', 2);
+  }
+  return result;
+}
+
+QStringList HumanControlPanel::PendingSpawnPoints() const
+{
+  QStringList result;
+  for (const auto &point : this->pendingSpawnPoints)
+  {
+    result << QString("%1, %2")
+        .arg(point.first, 0, 'f', 2).arg(point.second, 0, 'f', 2);
+  }
+  return result;
+}
+
+bool HumanControlPanel::ActiveSfmEnabled() const
+{
+  if (this->activeHumanIndex < 0 ||
+      this->activeHumanIndex >= static_cast<int>(this->humans.size()))
+    return true;
+  return this->humans.at(this->activeHumanIndex).sfmEnabled;
+}
+
+bool HumanControlPanel::UseSfm() const
+{
+  return this->useSfmState;
+}
+
+bool HumanControlPanel::CyclicRoute() const
+{
+  return this->cyclicRouteState;
+}
+
+bool HumanControlPanel::SfmAvailable() const
+{
+  return this->sfmAvailableState;
+}
+
+bool HumanControlPanel::AvoidObstacles() const
+{
+  return this->avoidObstaclesState;
+}
+
+bool HumanControlPanel::AvoidObstaclesAvailable() const
+{
+  return this->avoidObstaclesAvailableState;
+}
+
+void HumanControlPanel::setAvoidObstacles(bool _value)
+{
+  if (this->avoidObstaclesState == _value)
+    return;
+  this->avoidObstaclesState = _value;
+  if (_value)
+    this->NavPlannerAvailable();
+  this->routeSettingsChanged();
+}
+
+bool HumanControlPanel::NavPlannerAvailable()
+{
+  // A service, unlike SFM's topic, so this asks the service list rather than
+  // the subscriber list -- same idea either way: the feature lives in a world
+  // plugin, and a world that didn't load it simply won't be offering this.
+  std::vector<std::string> services;
+  this->node.ServiceList(services);
+  this->avoidObstaclesAvailableState =
+      std::find(services.begin(), services.end(), kNavPlanService) != services.end();
+  return this->avoidObstaclesAvailableState;
+}
+
+bool HumanControlPanel::PlanAroundObstacles(
+    const std::vector<std::pair<double, double>> &_route, double _bodyRadius,
+    std::vector<std::pair<double, double>> &_planned)
+{
+  _planned = _route;
+  if (_route.size() < 2)
+    return false;
+  if (!this->NavPlannerAvailable())
+    return false;
+
+  // Wire format must match NavGridSystem::OnPlanPath():
+  // "inflationRadius|x1,y1;x2,y2;..."
+  std::ostringstream payload;
+  payload << _bodyRadius << '|';
+  for (std::size_t i = 0; i < _route.size(); ++i)
+  {
+    if (i > 0)
+      payload << ';';
+    payload << _route[i].first << ',' << _route[i].second;
+  }
+
+  gz::msgs::StringMsg request;
+  request.set_data(payload.str());
+  gz::msgs::Pose_V response;
+  bool result = false;
+  const bool executed = this->node.Request(
+      kNavPlanService, request, kNavPlanTimeoutMs, response, result);
+  if (!executed || !result || response.pose_size() < 2)
+    return false;
+
+  _planned.clear();
+  for (int i = 0; i < response.pose_size(); ++i)
+  {
+    _planned.emplace_back(
+        response.pose(i).position().x(), response.pose(i).position().y());
+  }
+  return true;
+}
+
+bool HumanControlPanel::SpawnPicking() const
+{
+  return this->spawnPickingState;
+}
+
+int HumanControlPanel::RouteTargetCount() const
+{
+  int count = 0;
+  for (const auto &human : this->humans)
+  {
+    if (human.routeTarget)
+      ++count;
+  }
+  return count;
 }
 
 void HumanControlPanel::setActiveHuman(int _index)
@@ -1292,6 +1554,67 @@ void HumanControlPanel::spawnHuman(
     this->StartRealSpawn(_modelIndex, name, _posePreset, _followMode, _x, _y, _z, _yaw);
 }
 
+void HumanControlPanel::spawnHumans(
+    int _modelIndex, const QString &_baseName, int _count,
+    const QString &_posePreset, const QString &_followMode,
+    double _x, double _y, double _z, double _yaw)
+{
+  const QString baseName = _baseName.trimmed();
+  if (baseName.isEmpty())
+  {
+    this->SetStatus("名前を入力してください");
+    return;
+  }
+
+  // Copy the picked points before spawning: spawnHuman() -> ... ->
+  // PollSpawnConfirmation() eventually fires humansChanged(), and clearing
+  // the list below would invalidate anything we were still walking.
+  const auto points = this->pendingSpawnPoints;
+  const bool usePicked = !points.empty();
+  const int count = usePicked
+      ? static_cast<int>(points.size()) : std::clamp(_count, 1, 50);
+
+  // Numbering continues past whoever already exists, so a second batch
+  // never collides with the first one's names.
+  const int offset = static_cast<int>(this->humans.size());
+  for (int i = 0; i < count; ++i)
+  {
+    const QString name = baseName + QString::number(offset + i + 1);
+    double x = 0.0;
+    double y = 0.0;
+    if (usePicked)
+    {
+      // Exactly where each one was clicked.
+      x = points[static_cast<std::size_t>(i)].first;
+      y = points[static_cast<std::size_t>(i)].second;
+    }
+    else
+    {
+      // Spread kSpawnGridSpacing apart on the same grid nextSpawnX()/Y()
+      // already uses, re-based at (_x, _y) -- so this batch's own members
+      // are pre-separated before each one's individual
+      // ProbeSafeSpawnPosition() furniture-avoidance probe ever runs (that
+      // probe protects against pre-existing furniture/humans, not against N
+      // brand new spawns landing on top of each other, since it only ever
+      // reads pose state that already exists in gz-sim).
+      x = _x + (i % kSpawnGridColumns) * kSpawnGridSpacing;
+      y = _y + (i / kSpawnGridColumns) * kSpawnGridSpacing;
+    }
+    this->spawnHuman(_modelIndex, name, _posePreset, _followMode, x, y, _z, _yaw);
+  }
+
+  if (usePicked)
+  {
+    this->pendingSpawnPoints.clear();
+    this->pendingSpawnMarkersDirty = true;
+    this->pendingSpawnPointsChanged();
+  }
+  this->SetStatus(QString("%1人のspawnを開始しました（%2%3〜%2%4・%5）")
+      .arg(count).arg(baseName)
+      .arg(offset + 1).arg(offset + count)
+      .arg(usePicked ? "選択した地点" : "座標指定"));
+}
+
 void HumanControlPanel::StartRealSpawn(
     int _modelIndex, QString _name, QString _posePreset, QString _followMode,
     double _x, double _y, double _z, double _yaw)
@@ -1438,9 +1761,16 @@ void HumanControlPanel::ProbeSafeSpawnPosition(
   // now puts candidates in every direction, so the approach itself must
   // rotate with it, or a southward approach would cut across untested
   // (or already-rejected) territory instead of the same straight line the
-  // candidate was reached by. attempt 0 (offset (0, 0), the exact
-  // requested point) has no direction to derive from, so it keeps the
-  // original fixed south->north approach.
+  // candidate was reached by.
+  //
+  // Attempt 0 (offset (0, 0), the exact requested point) has no offset to
+  // derive a direction from. It approaches from the GUI camera's side
+  // instead of the old fixed +Y: the operator picked this point by clicking
+  // it, so the camera's line of sight to it is by definition unobstructed,
+  // making that the one direction the walk-in can't be blocked from by the
+  // very furniture the probe exists to detect. A fixed +Y walk-in is what
+  // made the check effectively test a point off to one side of the clicked
+  // one.
   double approachDirX = 0.0;
   double approachDirY = 1.0;
   const double offsetLength = std::hypot(offsetX, offsetY);
@@ -1449,8 +1779,23 @@ void HumanControlPanel::ProbeSafeSpawnPosition(
     approachDirX = offsetX / offsetLength;
     approachDirY = offsetY / offsetLength;
   }
-  const double approachStartX = candidateX - approachDirX * kSpawnGridSpacing;
-  const double approachStartY = candidateY - approachDirY * kSpawnGridSpacing;
+  else
+  {
+    std::lock_guard<std::mutex> lock(this->cameraPosMutex);
+    if (this->cameraPosValid)
+    {
+      const double toPointX = candidateX - this->cameraX;
+      const double toPointY = candidateY - this->cameraY;
+      const double length = std::hypot(toPointX, toPointY);
+      if (length > 1e-3)
+      {
+        approachDirX = toPointX / length;
+        approachDirY = toPointY / length;
+      }
+    }
+  }
+  const double approachStartX = candidateX - approachDirX * kSpawnProbeApproach;
+  const double approachStartY = candidateY - approachDirY * kSpawnProbeApproach;
 
   gz::msgs::EntityFactory request;
   request.set_sdf(probeSdf);
@@ -1536,13 +1881,22 @@ void HumanControlPanel::CheckProbeSettle(
     const auto it = this->poses.find(probeNameStd);
     if (it != this->poses.end() && it->second.valid)
     {
-      const double distanceFromStart =
-          std::hypot(it->second.x - _approachStartX, it->second.y - _approachStartY);
-      safe = distanceFromStart >= (kSpawnGridSpacing - kSpawnSafetyDisplacementMeters);
+      // Judged by ARRIVAL at the candidate, not by distance covered from
+      // the start: the question this check exists to answer is "is the
+      // candidate point itself free?", and a probe stopped by something
+      // between the two ends up short of the candidate either way. Measuring
+      // from the start instead let a probe that had been shoved sideways
+      // (travelled the distance, but not to the right place) count as
+      // success.
+      const double distanceToCandidate =
+          std::hypot(it->second.x - _candidateX, it->second.y - _candidateY);
+      safe = distanceToCandidate <= kSpawnSafetyDisplacementMeters;
     }
     this->poses.erase(probeNameStd);
     this->activeProbes.erase(probeNameStd);
   }
+  (void)_approachStartX;
+  (void)_approachStartY;
   // Always clean up the probe, safe or not -- it was only ever a test.
   this->RequestEntityRemoval(probeNameStd);
 
@@ -1626,6 +1980,13 @@ void HumanControlPanel::PollSpawnConfirmation(
   human.name = nameStd;
   human.model = _model.toStdString();
   human.process = _process;
+  // Where this human actually ended up (after any spawn-safety adjustment
+  // -- _x/_y are already the adjusted values by the time this runs), which
+  // is what the spawn marker marks. Colour by spawn order, wrapping.
+  human.spawnX = _x;
+  human.spawnY = _y;
+  human.spawnZ = _z;
+  human.markerColorIndex = static_cast<int>(this->humans.size()) % kMarkerColorCount;
   if (IsActorIndex(modelIndex))
   {
     const std::string velocityTopic = "/" + nameStd + "/cmd_vel";
@@ -1654,6 +2015,13 @@ void HumanControlPanel::PollSpawnConfirmation(
       const std::string poseTopic = "/" + nameStd + "/cmd_pose";
       human.posePublisher = this->node.Advertise<gz::msgs::StringMsg>(poseTopic);
     }
+    // sfm_enable_topic: matches exactly what SfmCrowdSystem::
+    // ApplyRegistration() derives from a plain name ("/<name>/sfm_enable"),
+    // see confirmRoute()/setSfmEnabled(). Advertised for every actor-backed
+    // human regardless of useSfm so the toggle already works the moment a
+    // route is later confirmed under SFM mode -- no separate re-wiring step.
+    human.sfmEnablePublisher =
+        this->node.Advertise<gz::msgs::Boolean>("/" + nameStd + "/sfm_enable");
   }
   this->humans.push_back(std::move(human));
   const int newIndex = static_cast<int>(this->humans.size()) - 1;
@@ -1692,6 +2060,22 @@ void HumanControlPanel::removeHuman(int _index)
   this->humans.erase(this->humans.begin() + _index);
   this->humansChanged();
 
+  // Scene nodes may only be destroyed on the render thread; hand this
+  // human's spawn marker over to ApplySpawnMarkers() to clean up.
+  {
+    std::lock_guard<std::mutex> lock(this->markerMutex);
+    this->markerRemovalQueue.push_back("__spawn_marker_" + human.name);
+  }
+
+  // Harmless no-op if this human was never registered with SfmCrowdSystem
+  // (it simply won't match any tracked name there) -- always sent anyway
+  // so a removed-then-recreated same-named human never inherits a stale
+  // route left over from before.
+  this->EnsureSfmPublishers();
+  gz::msgs::StringMsg unregisterMessage;
+  unregisterMessage.set_data(human.name);
+  this->sfmUnregisterPublisher.Publish(unregisterMessage);
+
   // Keep the keyboard target pointing at the same logical human across the
   // index shift caused by erase(), or clear it if that's the one removed.
   if (this->activeHumanIndex == _index)
@@ -1702,6 +2086,13 @@ void HumanControlPanel::removeHuman(int _index)
   this->activeViewIndexChanged();
   this->activeFollowModeChanged();
   this->activeLockedPoseChanged();
+
+  // Nobody left to follow: the camera would otherwise stay locked onto the
+  // last human's final position, leaving the operator staring at an empty
+  // patch of floor with no obvious way back. Return it to the world's own
+  // opening overview instead.
+  if (this->humans.empty())
+    this->resetToInitialView();
 
   this->TerminateProcessGroup(human.process);
 
@@ -1971,15 +2362,10 @@ void HumanControlPanel::sendWaypoint(int _index, double _x, double _y)
   human.pathPublisher.Publish(message);
 }
 
-void HumanControlPanel::sendPathTemplate(
-    int _index, int _templateIndex, double _centerX, double _centerY,
+void HumanControlPanel::generatePathTemplate(
+    int _templateIndex, double _centerX, double _centerY,
     double _size, int _numWaypoints, bool _clockwise)
 {
-  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
-    return;
-  auto &human = this->humans.at(_index);
-  if (!human.pathPublisher.Valid())
-    return;
   if (_templateIndex < 0 || _templateIndex >= kPathTemplateCount)
     return;
 
@@ -2018,19 +2404,440 @@ void HumanControlPanel::sendPathTemplate(
     }
   }
 
-  gz::msgs::Pose_V message;
+  // Replaces the pending route rather than publishing straight to one
+  // human: from here on a template-made route and a clicked one are the
+  // same thing, edited with the same undo/clear buttons and applied to the
+  // same target set by the same confirmRoute() button.
+  this->pendingRoute.clear();
   for (const auto &[x, y, yaw] : waypoints)
   {
-    auto *pose = message.add_pose();
-    pose->mutable_position()->set_x(x);
-    pose->mutable_position()->set_y(y);
-    pose->mutable_orientation()->set_z(std::sin(yaw * 0.5));
-    pose->mutable_orientation()->set_w(std::cos(yaw * 0.5));
+    (void)yaw;  // confirmRoute() re-derives headings from the point order.
+    this->pendingRoute.emplace_back(x, y);
   }
+  this->pendingRouteChanged();
+  this->SetStatus(QString(kPathTemplateLabels[_templateIndex]) + "の経路（" +
+      QString::number(this->pendingRoute.size()) +
+      "点）を生成しました。「この経路で歩かせる」で適用してください");
+}
+
+void HumanControlPanel::setRouteRecording(bool _enabled)
+{
+  if (this->routeRecordingState == _enabled)
+    return;
+  this->routeRecordingState = _enabled;
+  // Only one click mode at a time (see the routeRecording Q_PROPERTY): a
+  // click can't mean two things, and silently letting both be on would make
+  // whichever branch eventFilter() tests first quietly win.
+  if (_enabled && this->spawnPickingState)
+  {
+    this->spawnPickingState = false;
+    this->spawnPickingChanged();
+  }
+  this->routeRecordingChanged();
+  this->SetStatus(_enabled
+      ? "経路登録モード: ON（3Dビューのクリックが経由点になります）"
+      : "経路登録モード: OFF");
+}
+
+void HumanControlPanel::setSpawnPicking(bool _enabled)
+{
+  if (this->spawnPickingState == _enabled)
+    return;
+  this->spawnPickingState = _enabled;
+  if (_enabled && this->routeRecordingState)
+  {
+    this->routeRecordingState = false;
+    this->routeRecordingChanged();
+  }
+  this->spawnPickingChanged();
+  this->SetStatus(_enabled
+      ? "スポーン地点選択モード: ON（3Dビューをクリックした数だけ人物を配置できます）"
+      : "スポーン地点選択モード: OFF");
+}
+
+void HumanControlPanel::clearPendingRoute()
+{
+  if (this->pendingRoute.empty())
+    return;
+  this->pendingRoute.clear();
+  this->pendingRouteChanged();
+}
+
+void HumanControlPanel::undoLastRoutePoint()
+{
+  if (this->pendingRoute.empty())
+    return;
+  this->pendingRoute.pop_back();
+  this->pendingRouteChanged();
+}
+
+void HumanControlPanel::undoLastSpawnPoint()
+{
+  if (this->pendingSpawnPoints.empty())
+    return;
+  this->pendingSpawnPoints.pop_back();
+  this->pendingSpawnMarkersDirty = true;
+  this->pendingSpawnPointsChanged();
+}
+
+void HumanControlPanel::clearSpawnPoints()
+{
+  if (this->pendingSpawnPoints.empty())
+    return;
+  this->pendingSpawnPoints.clear();
+  this->pendingSpawnMarkersDirty = true;
+  this->pendingSpawnPointsChanged();
+}
+
+bool HumanControlPanel::routeTargetAt(int _index) const
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return false;
+  return this->humans.at(_index).routeTarget;
+}
+
+void HumanControlPanel::setRouteTarget(int _index, bool _value)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  this->humans.at(_index).routeTarget = _value;
+  this->humansChanged();
+}
+
+void HumanControlPanel::setAllRouteTargets(bool _value)
+{
+  for (auto &human : this->humans)
+    human.routeTarget = _value;
+  this->humansChanged();
+}
+
+std::vector<int> HumanControlPanel::RouteTargetIndices() const
+{
+  std::vector<int> indices;
+  for (std::size_t i = 0; i < this->humans.size(); ++i)
+  {
+    if (this->humans[i].routeTarget)
+      indices.push_back(static_cast<int>(i));
+  }
+  // Nothing ticked: fall back to the active human so the button still does
+  // the obvious thing for someone who never touched a tickbox.
+  if (indices.empty() && this->activeHumanIndex >= 0 &&
+      this->activeHumanIndex < static_cast<int>(this->humans.size()))
+  {
+    indices.push_back(this->activeHumanIndex);
+  }
+  return indices;
+}
+
+void HumanControlPanel::setUseSfm(bool _value)
+{
+  if (this->useSfmState == _value)
+    return;
+  this->useSfmState = _value;
+  // Re-check availability at the moment someone actually asks for SFM, so
+  // the warning in the QML reflects this world rather than a stale probe.
+  if (_value)
+    this->SfmSystemAvailable();
+  this->routeSettingsChanged();
+}
+
+void HumanControlPanel::setCyclicRoute(bool _value)
+{
+  if (this->cyclicRouteState == _value)
+    return;
+  this->cyclicRouteState = _value;
+  this->routeSettingsChanged();
+}
+
+void HumanControlPanel::setSfmEnabled(int _index, bool _value)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  auto &human = this->humans.at(_index);
+  if (!human.sfmEnablePublisher.Valid())
+    return;
+  gz::msgs::Boolean message;
+  message.set_data(_value);
+  human.sfmEnablePublisher.Publish(message);
+  human.sfmEnabled = _value;
+  if (_index == this->activeHumanIndex)
+    this->sfmModeChanged();
+  this->SetStatus(QString::fromStdString(human.name) + " のSFM（自動回避）を" +
+      (_value ? QString("有効") : QString("無効")) + "にしました");
+}
+
+void HumanControlPanel::setSfmEnabledForTargets(bool _value)
+{
+  const auto targets = this->RouteTargetIndices();
+  for (const int index : targets)
+    this->setSfmEnabled(index, _value);
+  this->SetStatus(QString("%1人のSFM（自動回避）を%2にしました")
+      .arg(targets.size()).arg(_value ? "有効" : "無効"));
+}
+
+void HumanControlPanel::setShowSpawnMarker(int _index, bool _value)
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return;
+  this->humans.at(_index).showSpawnMarker = _value;
+  // ApplySpawnMarkers() (render thread) picks this up next frame, same
+  // deferred-to-the-render-thread arrangement setShowCollision() uses.
+  this->humansChanged();
+}
+
+void HumanControlPanel::setShowSpawnMarkerAll(bool _value)
+{
+  for (auto &human : this->humans)
+    human.showSpawnMarker = _value;
+  this->humansChanged();
+}
+
+bool HumanControlPanel::showSpawnMarkerAt(int _index) const
+{
+  if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
+    return false;
+  return this->humans.at(_index).showSpawnMarker;
+}
+
+QString HumanControlPanel::spawnMarkerColorAt(int _index) const
+{
+  int colorIndex = 0;
+  if (_index >= 0 && _index < static_cast<int>(this->humans.size()))
+    colorIndex = this->humans.at(_index).markerColorIndex;
+  const auto &color = kMarkerColors[colorIndex % kMarkerColorCount];
+  return QString("#%1%2%3")
+      .arg(static_cast<int>(color[0] * 255.0), 2, 16, QChar('0'))
+      .arg(static_cast<int>(color[1] * 255.0), 2, 16, QChar('0'))
+      .arg(static_cast<int>(color[2] * 255.0), 2, 16, QChar('0'));
+}
+
+void HumanControlPanel::EnsureSfmPublishers()
+{
+  // Topic strings must match SfmCrowdSystem's own register_topic/
+  // unregister_topic SDF defaults (src/sfm_crowd_system.cpp) -- both sides
+  // hardcode the same default rather than this panel discovering it from
+  // the world's SDF, since there is normally exactly one SfmCrowdSystem
+  // per world and this keeps the wiring a single obvious string to grep
+  // for on either side.
+  if (!this->sfmRegisterPublisher.Valid())
+  {
+    this->sfmRegisterPublisher =
+        this->node.Advertise<gz::msgs::StringMsg>("/gz_human_sim/sfm/register_human");
+  }
+  if (!this->sfmUnregisterPublisher.Valid())
+  {
+    this->sfmUnregisterPublisher =
+        this->node.Advertise<gz::msgs::StringMsg>("/gz_human_sim/sfm/unregister_human");
+  }
+}
+
+void HumanControlPanel::SendSfmRegistration(int _index)
+{
+  auto &human = this->humans.at(_index);
+  this->EnsureSfmPublishers();
+
+  // Wire format: name|cyclicGoals(0|1)|desiredVelocity|radius|x1,y1;x2,y2;...
+  // -1|-1 for desiredVelocity/radius means "use SfmCrowdSystem's own
+  // default" -- see SfmCrowdSystem::ParseRegistration()/RegistrationRequest,
+  // which this must match exactly.
+  std::ostringstream payload;
+  payload << human.name << '|' << (this->cyclicRouteState ? '1' : '0') << "|-1|-1|";
+  // lastSentRoute, not pendingRoute: when obstacle avoidance is on this is
+  // the planned route that goes around things, and when it's off the two are
+  // identical (confirmRoute() sets it either way).
+  for (std::size_t i = 0; i < this->lastSentRoute.size(); ++i)
+  {
+    if (i > 0)
+      payload << ';';
+    payload << this->lastSentRoute[i].first << ',' << this->lastSentRoute[i].second;
+  }
+  gz::msgs::StringMsg message;
+  message.set_data(payload.str());
+  this->sfmRegisterPublisher.Publish(message);
+
+  // A registered route only actually moves the human once sfm_enable is
+  // also true. Force it back on rather than merely republishing whatever it
+  // happened to be: a human that had been handed back to manual teleop
+  // (sfm_enable false) would otherwise accept the registration and keep
+  // standing still, which is exactly the "経路を確定しても歩かない" case.
+  if (human.sfmEnablePublisher.Valid())
+  {
+    gz::msgs::Boolean enableMessage;
+    enableMessage.set_data(true);
+    human.sfmEnablePublisher.Publish(enableMessage);
+    human.sfmEnabled = true;
+  }
+}
+
+void HumanControlPanel::SendSimplePath(int _index)
+{
+  auto &human = this->humans.at(_index);
+  if (!human.pathPublisher.Valid())
+    return;
+
+  // Orientation toward the NEXT point so ActorCommandPlugin's path-follow
+  // arrives facing onward instead of at whatever heading it happened to
+  // have, except the last point (nothing to face, so identity orientation
+  // -- ApplyPathCommand() only ever uses a waypoint's position to steer, so
+  // this is purely cosmetic, not load-bearing).
+  gz::msgs::Pose_V message;
+  const auto &route = this->lastSentRoute;
+  for (std::size_t i = 0; i < route.size(); ++i)
+  {
+    auto *pose = message.add_pose();
+    pose->mutable_position()->set_x(route[i].first);
+    pose->mutable_position()->set_y(route[i].second);
+    if (i + 1 < route.size())
+    {
+      const double yaw = std::atan2(route[i + 1].second - route[i].second,
+          route[i + 1].first - route[i].first);
+      pose->mutable_orientation()->set_z(std::sin(yaw * 0.5));
+      pose->mutable_orientation()->set_w(std::cos(yaw * 0.5));
+    }
+    else
+    {
+      pose->mutable_orientation()->set_w(1.0);
+    }
+  }
+
+  // SfmCrowdSystem, if this human was previously registered with it, keeps
+  // publishing its own cmd_vel every tick and would immediately overwrite
+  // the path-follow motion. Hand the human back FIRST, so there is no
+  // window where both are steering it.
+  if (human.sfmEnablePublisher.Valid() && human.sfmEnabled)
+  {
+    gz::msgs::Boolean enableMessage;
+    enableMessage.set_data(false);
+    human.sfmEnablePublisher.Publish(enableMessage);
+    human.sfmEnabled = false;
+  }
+
   human.pathPublisher.Publish(message);
-  this->SetStatus(QString::fromStdString(human.name) + " に" +
-      kPathTemplateLabels[_templateIndex] + "の経路（" +
-      QString::number(waypoints.size()) + "点）を送信しました");
+}
+
+void HumanControlPanel::confirmRoute()
+{
+  if (this->pendingRoute.empty())
+  {
+    this->SetStatus("経由点がありません。「経路登録モード」をONにして3Dビューを"
+        "クリックするか、経路テンプレートで生成してください");
+    return;
+  }
+
+  const auto targets = this->RouteTargetIndices();
+  if (targets.empty())
+  {
+    this->SetStatus("経路の対象人物がいません（人物をspawnして「経路対象」に"
+        "チェックを入れてください）");
+    return;
+  }
+
+  if (this->useSfmState && !this->SfmSystemAvailable())
+  {
+    // Publishing an SFM registration into a world with no SfmCrowdSystem is
+    // a silent no-op -- refuse instead of letting the operator watch nobody
+    // move and have no idea why.
+    this->SetStatus("このワールドにはSFM（自動回避）システムが読み込まれていません。"
+        "「単純パス追従」に切り替えてください");
+    this->routeSettingsChanged();
+    return;
+  }
+
+  // Turn the drawn route into one that actually goes around walls and
+  // furniture, BEFORE it's sent to anybody. Everything downstream
+  // (SendSfmRegistration()/SendSimplePath()) reads lastSentRoute, so both
+  // modes get the planned version and neither has to know planning happened.
+  //
+  // The body radius handed to the planner is the target's own collision
+  // capsule (the same value the 当たり判定 slider sets), so the path is only
+  // routed through gaps this person actually fits through.
+  bool planned = false;
+  if (this->avoidObstaclesState)
+  {
+    double bodyRadius = 0.25;
+    if (!targets.empty())
+      bodyRadius = this->humans.at(targets.front()).collisionRadius;
+    planned = this->PlanAroundObstacles(
+        this->pendingRoute, bodyRadius, this->lastSentRoute);
+    if (!planned && !this->NavPlannerAvailable())
+    {
+      this->SetStatus("このワールドには経路プランナ（NavGridSystem）が"
+          "読み込まれていないため、障害物を避けない直線経路で送信します");
+    }
+  }
+  else
+  {
+    this->lastSentRoute = this->pendingRoute;
+  }
+  if (this->lastSentRoute.empty())
+    this->lastSentRoute = this->pendingRoute;
+
+  int sent = 0;
+  int skipped = 0;
+  for (const int index : targets)
+  {
+    auto &human = this->humans.at(index);
+    // Only actor-backed humans can walk anything at all (static models have
+    // no ActorCommandPlugin) -- count them out loud rather than silently.
+    if (!human.pathPublisher.Valid())
+    {
+      ++skipped;
+      continue;
+    }
+    if (this->useSfmState)
+    {
+      this->SendSfmRegistration(index);
+    }
+    else
+    {
+      // "経路専用"/"テレオペ" both follow a path; make sure the human is in
+      // one of them. followModeIndex 0 = auto, 1 = path (see
+      // kFollowModeValues) -- both fine, so nothing to change here, but a
+      // human whose SDF was spawned with follow_mode "velocity" would
+      // ignore cmd_path, so push "auto" to be certain.
+      if (human.followModePublisher.Valid())
+      {
+        gz::msgs::StringMsg modeMessage;
+        modeMessage.set_data(kFollowModeValues[human.followModeIndex]);
+        human.followModePublisher.Publish(modeMessage);
+      }
+      this->SendSimplePath(index);
+    }
+    ++sent;
+  }
+
+  this->sfmModeChanged();
+  if (sent == 0)
+  {
+    this->SetStatus("経路を歩ける人物が対象にいません"
+        "（walking_actor / DoctorFemaleWalk のみ経路に対応しています）");
+    return;
+  }
+  QString status = QString("%1人に経路（%2点・%3）を適用しました")
+      .arg(sent).arg(this->lastSentRoute.size())
+      .arg(this->useSfmState ? "SFM自動回避" : "単純パス追従");
+  if (planned)
+  {
+    status += QString("／障害物を回避（経由点%1→%2点）")
+        .arg(this->pendingRoute.size()).arg(this->lastSentRoute.size());
+  }
+  if (skipped > 0)
+    status += QString("／%1人は経路非対応のため除外").arg(skipped);
+  this->SetStatus(status);
+}
+
+bool HumanControlPanel::SfmSystemAvailable()
+{
+  // SfmCrowdSystem subscribes to the register topic when it loads; nothing
+  // else does. gz-transport's own discovery can therefore answer "is that
+  // system in this world?" without either side having to advertise a
+  // dedicated heartbeat.
+  std::vector<gz::transport::MessagePublisher> publishers;
+  std::vector<gz::transport::MessagePublisher> subscribers;
+  const bool queried = this->node.TopicInfo(
+      "/gz_human_sim/sfm/register_human", publishers, subscribers);
+  this->sfmAvailableState = queried && !subscribers.empty();
+  return this->sfmAvailableState;
 }
 
 void HumanControlPanel::setViewpoint(int _index, int _viewIndex, double _distance)
@@ -2081,16 +2888,24 @@ void HumanControlPanel::setViewpoint(int _index, int _viewIndex, double _distanc
   switch (_viewIndex)
   {
     case kViewFirstPerson:
+    {
       // Camera right at the actor's own head, looking out at a point far
       // ahead in its own (local) frame: turns with the actor like its own
       // eyes -- the one view where that's actually wanted, unlike every
       // other case below (see ViewCommand::worldFrame). The distance box
       // doesn't apply to this view (same as GuiderRobotManager's
       // equivalent).
-      command.followOffset = {0.1, 0.0, kEyeHeight};
-      command.trackOffset = {3.0, 0.0, kEyeHeight - 0.05};
+      //
+      // eyeOffset is height ABOVE THIS MODEL'S OWN ORIGIN, not the flat
+      // absolute kEyeHeight -- see kEyeHeight's own comment for why: the
+      // origin itself already sits partway up the body for most models.
+      const double eyeOffset = std::max(kMinEyeOffset,
+          kEyeHeight - DefaultZForModelName(this->humans.at(_index).model));
+      command.followOffset = {0.1, 0.0, eyeOffset};
+      command.trackOffset = {3.0, 0.0, eyeOffset - 0.05};
       command.worldFrame = false;
       break;
+    }
     case kViewBehind:
       command.followOffset = {-distance, 0.0, height};
       break;
@@ -2168,32 +2983,8 @@ void HumanControlPanel::ApplyViewpoint()
   if (!scene)
     return;
 
-  // The MinimalScene plugin tags the GUI camera with this user data.
-  if (!this->userCamera)
-  {
-    for (unsigned int i = 0; i < scene->NodeCount(); ++i)
-    {
-      auto camera = std::dynamic_pointer_cast<gz::rendering::Camera>(
-          scene->NodeByIndex(i));
-      if (!camera || !camera->HasUserData("user-camera"))
-        continue;
-      const auto data = camera->UserData("user-camera");
-      const auto *flag = std::get_if<bool>(&data);
-      if (flag && *flag)
-      {
-        this->userCamera = camera;
-        break;
-      }
-    }
-    if (!this->userCamera)
-      return;
-    // First time the camera is found, it's still wherever gui.config's
-    // MinimalScene <camera_pose> placed it -- nothing has engaged
-    // follow/track yet at this point in a fresh launch. Save it so
-    // resetToInitialView() has a real pose to snap back to.
-    this->initialCameraPose = this->userCamera->WorldPose();
-    this->initialCameraPoseCaptured = true;
-  }
+  if (!this->EnsureUserCamera(scene))
+    return;
 
   const auto finish = [this]()
   {
@@ -2257,6 +3048,171 @@ void HumanControlPanel::ApplyViewpoint()
 
   finish();
   this->SetStatus(command.label);
+}
+
+bool HumanControlPanel::EnsureUserCamera(const gz::rendering::ScenePtr &_scene)
+{
+  // The MinimalScene plugin tags the GUI camera with this user data.
+  if (!this->userCamera)
+  {
+    for (unsigned int i = 0; i < _scene->NodeCount(); ++i)
+    {
+      auto camera = std::dynamic_pointer_cast<gz::rendering::Camera>(
+          _scene->NodeByIndex(i));
+      if (!camera || !camera->HasUserData("user-camera"))
+        continue;
+      const auto data = camera->UserData("user-camera");
+      const auto *flag = std::get_if<bool>(&data);
+      if (flag && *flag)
+      {
+        this->userCamera = camera;
+        break;
+      }
+    }
+    if (!this->userCamera)
+      return false;
+    // First time the camera is found, it's still wherever gui.config's
+    // MinimalScene <camera_pose> placed it -- nothing has engaged
+    // follow/track yet at this point in a fresh launch. Save it so
+    // resetToInitialView() has a real pose to snap back to.
+    this->initialCameraPose = this->userCamera->WorldPose();
+    this->initialCameraPoseCaptured = true;
+  }
+
+  // Kept fresh every frame for ProbeSafeSpawnPosition(), which runs on the
+  // Qt thread and can't touch the scene itself -- see the cameraX/cameraY
+  // members' comment for why the probe wants the camera's position.
+  const auto pose = this->userCamera->WorldPose();
+  {
+    std::lock_guard<std::mutex> lock(this->cameraPosMutex);
+    this->cameraX = pose.Pos().X();
+    this->cameraY = pose.Pos().Y();
+    this->cameraPosValid = true;
+  }
+  return true;
+}
+
+gz::rendering::VisualPtr HumanControlPanel::CreateMarkerVisual(
+    const gz::rendering::ScenePtr &_scene, const std::string &_name,
+    double _x, double _y, int _colorIndex, bool _pending) const
+{
+  if (!_scene)
+    return nullptr;
+  // A stale visual under this name (same human name respawned, a marker
+  // whose removal is still queued, ...) would make CreateVisual() fail.
+  if (auto existing = _scene->VisualByName(_name))
+    _scene->DestroyVisual(existing);
+
+  auto visual = _scene->CreateVisual(_name);
+  if (!visual)
+    return nullptr;
+
+  auto material = _scene->CreateMaterial();
+  if (material)
+  {
+    const double alpha = _pending ? kPendingMarkerAlpha : kMarkerAlpha;
+    double r = 1.0, g = 1.0, b = 1.0;
+    if (!_pending)
+    {
+      const auto &color = kMarkerColors[_colorIndex % kMarkerColorCount];
+      r = color[0];
+      g = color[1];
+      b = color[2];
+    }
+    material->SetAmbient(r, g, b, alpha);
+    material->SetDiffuse(r, g, b, alpha);
+    // Emissive as well as diffuse so the disc keeps its identity colour in
+    // shadow -- it's a label, and a label that goes dark under a table is
+    // no longer telling anyone which person it belongs to.
+    material->SetEmissive(r * 0.6, g * 0.6, b * 0.6);
+    material->SetTransparency(1.0 - alpha);
+    // Without this the transparency above is ignored by ogre2.
+    material->SetDepthWriteEnabled(false);
+    material->SetCastShadows(false);
+  }
+
+  auto geometry = _scene->CreateCylinder();
+  if (!geometry)
+  {
+    _scene->DestroyVisual(visual);
+    return nullptr;
+  }
+  if (material)
+    geometry->SetMaterial(material);
+  visual->AddGeometry(geometry);
+  // Unit cylinder scaled into a flat disc lying on the floor.
+  visual->SetLocalScale(kMarkerRadius * 2.0, kMarkerRadius * 2.0, kMarkerThickness);
+  visual->SetLocalPosition(_x, _y, kMarkerZ);
+  // Purely decorative: never let a click in the 3D view select the marker
+  // instead of what's behind it (that click is how spawn points and route
+  // points get placed in the first place -- see eventFilter()).
+  visual->SetUserData("gui-only", true);
+  _scene->RootVisual()->AddChild(visual);
+  return visual;
+}
+
+void HumanControlPanel::ApplySpawnMarkers()
+{
+  auto scene = gz::rendering::sceneFromFirstRenderEngine();
+  if (!scene)
+    return;
+
+  // Markers whose human was removed on the Qt thread -- destroying a scene
+  // node is render-thread-only, hence the queue.
+  {
+    std::lock_guard<std::mutex> lock(this->markerMutex);
+    for (const auto &name : this->markerRemovalQueue)
+    {
+      if (auto visual = scene->VisualByName(name))
+        scene->DestroyVisual(visual);
+    }
+    this->markerRemovalQueue.clear();
+  }
+
+  for (auto &human : this->humans)
+  {
+    if (!human.markerVisual)
+    {
+      human.markerVisual = this->CreateMarkerVisual(
+          scene, "__spawn_marker_" + human.name,
+          human.spawnX, human.spawnY, human.markerColorIndex, false);
+      if (!human.markerVisual)
+        continue;
+      // A freshly created visual is visible; force the desired state to be
+      // pushed below rather than assumed, same tri-state reasoning
+      // appliedShowCollision uses.
+      human.appliedShowSpawnMarker = -1;
+    }
+    const int desired = human.showSpawnMarker ? 1 : 0;
+    if (human.appliedShowSpawnMarker == desired)
+      continue;
+    human.markerVisual->SetVisible(human.showSpawnMarker);
+    human.appliedShowSpawnMarker = desired;
+  }
+
+  // Picked-but-not-yet-spawned points get their own neutral markers, so
+  // clicking a spawn point gives immediate feedback in the 3D view rather
+  // than only a line of text in the panel. Rebuilt wholesale whenever the
+  // list changes at all -- tracked by an explicit dirty flag rather than by
+  // comparing sizes, since undoing one point and clicking a different one
+  // leaves the count identical while every marker needs to move.
+  if (this->pendingSpawnMarkersDirty)
+  {
+    this->pendingSpawnMarkersDirty = false;
+    for (auto &visual : this->pendingSpawnMarkerVisuals)
+    {
+      if (visual)
+        scene->DestroyVisual(visual);
+    }
+    this->pendingSpawnMarkerVisuals.clear();
+    for (std::size_t i = 0; i < this->pendingSpawnPoints.size(); ++i)
+    {
+      this->pendingSpawnMarkerVisuals.push_back(this->CreateMarkerVisual(
+          scene, "__spawn_pending_" + std::to_string(i),
+          this->pendingSpawnPoints[i].first, this->pendingSpawnPoints[i].second,
+          0, true));
+    }
+  }
 }
 
 bool HumanControlPanel::SetCollisionBodyVisible(
