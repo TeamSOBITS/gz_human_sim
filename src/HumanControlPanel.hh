@@ -9,6 +9,13 @@
 #include <utility>
 #include <vector>
 
+// Opaque SDL2 gamepad handle -- forward-declared (SDL2's own tag name for
+// the type behind `SDL_GameController`) so this header does not need to
+// include <SDL2/SDL.h> itself; only the .cc, which does the actual
+// polling, needs the real SDL API. Mirrors guide_robot's
+// GuiderRobotManager, which the DualSense mode here is modeled on.
+struct _SDL_GameController;
+
 #include <QObject>
 #include <QPointer>
 #include <QProcess>
@@ -168,6 +175,23 @@ class HumanControlPanel : public gz::gui::Plugin
   Q_PROPERTY(bool spawnPicking READ SpawnPicking NOTIFY spawnPickingChanged)
   Q_PROPERTY(QStringList pendingSpawnPoints READ PendingSpawnPoints NOTIFY pendingSpawnPointsChanged)
 
+  /// \brief Whether the DualSense/gamepad teleop mode is active. While on,
+  /// the left stick drives activeHumanIndex (via the same teleopMove()
+  /// analog hook the keyboard's J-strafe mode uses) and the right stick
+  /// orbits the GUI camera around it every rendered frame -- see
+  /// PollDualsense(). Independent of and layered on top of keyboard
+  /// teleop, not exclusive with it. Mirrors guide_robot's
+  /// GuiderRobotManager::dualsenseModeEnabled.
+  Q_PROPERTY(
+    bool dualsenseModeEnabled
+    READ DualsenseModeEnabled
+    WRITE SetDualsenseModeEnabled
+    NOTIFY dualsenseModeChanged)
+
+  /// \brief Human-readable controller connection state for the QML label
+  /// (e.g. "DualSense Wireless Controller 接続中" / "コントローラが見つかりません").
+  Q_PROPERTY(QString dualsenseStatusText READ DualsenseStatusText NOTIFY dualsenseStatusChanged)
+
   public: HumanControlPanel();
   public: ~HumanControlPanel() override;
 
@@ -201,6 +225,9 @@ class HumanControlPanel : public gz::gui::Plugin
   public: int RouteTargetCount() const;
   public: bool SpawnPicking() const;
   public: QStringList PendingSpawnPoints() const;
+  public: bool DualsenseModeEnabled() const;
+  public: void SetDualsenseModeEnabled(bool _enabled);
+  public: QString DualsenseStatusText() const;
 
   /// \brief Suggested spawn name for a model index ("human1", "human2", …).
   public: Q_INVOKABLE QString defaultName(int _modelIndex) const;
@@ -1039,6 +1066,38 @@ class HumanControlPanel : public gz::gui::Plugin
   /// pending.
   private: bool EnsureUserCamera(const gz::rendering::ScenePtr &_scene);
 
+  /// \brief Render thread only, called every frame from eventFilter()
+  /// alongside ApplyViewpoint(): while dualsenseModeState is on, reads the
+  /// SDL game controller's stick/trigger axes and drives activeHumanIndex
+  /// (teleopMove()/teleopStop()) and the camera orbit
+  /// (ApplyDualsenseOrbit()). A no-op when the mode is off or no
+  /// controller is open. Unlike GuiderRobotManager's equivalent, humans
+  /// have no non-holonomic type to branch on -- ActorCommandPlugin always
+  /// accepts an independent lateral component (see DirectionToTwist()'s J
+  /// strafe mode), so the left stick always gives full continuous-angle
+  /// translation.
+  private: void PollDualsense();
+
+  /// \brief Continuously re-asserts the GUI camera's follow/track target
+  /// at an orbit offset driven by dualsenseOrbitYaw/Pitch/Distance
+  /// (updated each call from the right stick's _rightX/_rightY, already
+  /// deadzoned and normalized to -1..1). Unlike ApplyViewpoint()'s
+  /// discrete, one-shot ViewCommand, this runs every frame while
+  /// DualSense mode is on and bypasses the transition-gain/retry
+  /// machinery entirely. Mirrors GuiderRobotManager::ApplyDualsenseOrbit().
+  private: void ApplyDualsenseOrbit(double _rightX, double _rightY);
+
+  /// \brief Opens the first SDL game controller found (lazily
+  /// SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) on first use), setting
+  /// dualsenseStatusTextState either way. Called from
+  /// SetDualsenseModeEnabled(true).
+  private: void OpenDualsenseController();
+
+  /// \brief Closes the open controller (if any) and stops
+  /// activeHumanIndex's motion. Called from SetDualsenseModeEnabled(false)
+  /// and the destructor.
+  private: void CloseDualsenseController();
+
   private: gz::transport::Node::Publisher sfmRegisterPublisher;
   private: gz::transport::Node::Publisher sfmUnregisterPublisher;
   /// \brief Global route-recording toggle -- see the routeRecording
@@ -1090,6 +1149,31 @@ class HumanControlPanel : public gz::gui::Plugin
   private: double cameraY{0.0};
   private: bool cameraPosValid{false};
 
+  /// \brief SDL game controller handle (really an `SDL_GameController *`,
+  /// see the .cc), null while no DualSense/gamepad is open. Owned by this
+  /// plugin; opened in OpenDualsenseController(), closed in
+  /// CloseDualsenseController() and the destructor.
+  private: _SDL_GameController *dualsenseController{nullptr};
+  private: bool dualsenseModeState{false};
+  private: QString dualsenseStatusTextState{"未接続"};
+
+  /// \brief True while the left stick was driving activeHumanIndex on the
+  /// previous PollDualsense() tick -- used to send exactly one
+  /// teleopStop() on the press->idle transition instead of a zero Twist
+  /// every single rendered frame the sticks sit centered.
+  private: bool dualsenseWasMoving{false};
+
+  /// \brief Render-thread-only orbit camera state for
+  /// ApplyDualsenseOrbit(), reset to the same offset kViewBehind uses
+  /// (yaw=0, pitch=0) whenever DualSense mode starts orbiting a different
+  /// human than last time (dualsenseOrbitTarget mismatch).
+  private: std::string dualsenseOrbitTarget;
+  private: double dualsenseOrbitYaw{0.0};
+  private: double dualsenseOrbitPitch{0.0};
+  private: double dualsenseOrbitDistance{3.0};
+  private: std::chrono::steady_clock::time_point dualsenseLastPollTime;
+  private: bool dualsenseLastPollValid{false};
+
   signals: void humansChanged();
   signals: void StatusChanged();
   signals: void activeHumanChanged();
@@ -1109,6 +1193,8 @@ class HumanControlPanel : public gz::gui::Plugin
   signals: void activeLockedPoseChanged();
   signals: void jumpHeightChanged();
   signals: void speedMultiplierChanged();
+  signals: void dualsenseModeChanged();
+  signals: void dualsenseStatusChanged();
 };
 }  // namespace gz_human_sim
 #endif

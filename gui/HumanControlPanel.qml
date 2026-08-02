@@ -725,6 +725,38 @@ Rectangle {
       }
     }
 
+    // ── DualSense mode ───────────────────────────────────
+    // Left stick drives activeHumanIndex (full 360°移動、上の「基準移動速度」
+    // スライダーがそのまま適用される)、右スティックはカメラをその人物の
+    // 周りで旋回させる -- キーボード/矢印パッドの代替であり、併用も可能
+    // （どちらもHumanControlPanel.teleopMove()を呼ぶだけ）。
+    // guide_robotのGuiderRobotManagerと同じ仕組み。
+    Rectangle { Layout.fillWidth: true; height: 1; color: "#c7d8d4" }
+    Label { text: "DualSenseモード"; color: "#183b37"; font.bold: true }
+    RowLayout {
+      Layout.fillWidth: true
+      CheckBox {
+        text: "有効化"
+        checked: HumanControlPanel.dualsenseModeEnabled
+        onToggled: HumanControlPanel.dualsenseModeEnabled = checked
+      }
+      Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        text: HumanControlPanel.dualsenseStatusText
+        color: HumanControlPanel.dualsenseModeEnabled ? "#126e68" : "#8aa19c"
+      }
+    }
+    Label {
+      Layout.fillWidth: true
+      visible: HumanControlPanel.dualsenseModeEnabled
+      wrapMode: Text.Wrap
+      font.pixelSize: 10
+      color: "#8aa19c"
+      text: "左スティック=全方向移動、L2/R2=旋回、右スティック=視点。" +
+          "上の「基準移動速度」スライダーとShift/Ctrlがそのまま適用されます。"
+    }
+
     // ── Follow mode (runtime) ──────────────────────────────
     // Changes an already-spawned human's follow_mode live, via
     // ActorCommandPlugin's follow_mode_topic -- separate from the spawn
