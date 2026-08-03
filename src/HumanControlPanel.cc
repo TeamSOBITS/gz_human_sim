@@ -186,13 +186,25 @@ static constexpr int kMarkerColorCount =
 // Spawn-marker disc geometry: a cylinder squashed flat and laid just above
 // the floor, wide enough to read as "a person starts here" from the default
 // overview camera without hiding the person standing on it.
-static constexpr double kMarkerRadius = 0.12;
-static constexpr double kMarkerThickness = 0.03;
+// Half-width of the magic-circle marker. Deliberately much bigger than
+// the 0.12 the old flat disc used: this panel is normally driven in a
+// whole building, and at a camera distance that shows a floor plan a
+// person-sized dot on the ground is simply not visible. 1.2 m across
+// reads from across a room without burying the spot it marks.
+static constexpr double kMarkerRadius = 0.6;
 static constexpr double kMarkerZ = 0.02;
+
+// Radians per second the circles turn. Slow on purpose: an idle animation
+// to catch the eye, not something competing with the humans for attention.
+static constexpr double kMarkerSpinRate = 0.35;
 // Not-yet-spawned picked points are drawn in the same shape but neutral
 // white and more transparent -- they aren't anybody's marker yet.
-static constexpr double kMarkerAlpha = 0.75;
-static constexpr double kPendingMarkerAlpha = 0.45;
+// Near-solid: at the camera distances these panels are actually used from,
+// anything much lower washes the circle out against a light floor. The
+// pending marker stays a little softer than a placed one purely so the two
+// are still tellable apart at a glance, not to make it subtle.
+static constexpr double kMarkerAlpha = 0.97;
+static constexpr double kPendingMarkerAlpha = 0.85;
 
 // kHumanModelDefaultZ[] for a model NAME rather than an index -- used by
 // setViewpoint()'s first-person case, which only has Human::model (a
@@ -437,6 +449,20 @@ void HumanControlPanel::LoadConfig(const tinyxml2::XMLElement *)
         packagePrefix = libPath.substr(0, libDir) + "/../../..";
     }
   }
+  // Magic-circle texture for the spawn markers (see CreateMarkerVisual).
+  // Resolved from the same prefix; regenerate the asset itself with
+  // `ros2 run guider_multifloor_builder guider_make_spawn_marker`, which
+  // writes this copy and guide_robot's identical one together.
+  {
+    const std::string markerPath =
+        packagePrefix + "/share/gz_human_sim/media/spawn_marker.png";
+    if (std::ifstream(markerPath))
+      this->spawnMarkerTexturePath = markerPath;
+    else
+      gzwarn << "[HumanControlPanel] spawn marker texture not found at "
+             << markerPath << "; markers will be drawn untextured.\n";
+  }
+
   const std::string presetsPath =
       packagePrefix + "/share/gz_human_sim/config/human_pose_presets.yaml";
   std::ifstream presetsFile(presetsPath);
@@ -523,13 +549,17 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
     else if (this->spawnPickingState)
     {
       // Points accumulate so one Spawn press can create a whole group, each
-      // person where they were clicked.
-      this->pendingSpawnPoints.emplace_back(point.X(), point.Y());
+      // person where they were clicked. Z is kept as well as X/Y: the click
+      // reports the height of the surface it hit, which is what lets a
+      // click on an upper floor actually put someone on that floor.
+      this->pendingSpawnPoints.push_back(
+          PickedPoint{point.X(), point.Y(), point.Z()});
       this->pendingSpawnMarkersDirty = true;
       this->pendingSpawnPointsChanged();
-      this->SetStatus(QString("スポーン地点%1: (%2, %3)")
+      this->SetStatus(QString("スポーン地点%1: (%2, %3, %4)")
           .arg(this->pendingSpawnPoints.size())
-          .arg(point.X(), 0, 'f', 2).arg(point.Y(), 0, 'f', 2));
+          .arg(point.X(), 0, 'f', 2).arg(point.Y(), 0, 'f', 2)
+          .arg(point.Z(), 0, 'f', 2));
     }
     // Neither mode on: deliberately does nothing, leaving ordinary clicking
     // in the viewport (selection, camera work) alone -- see the
@@ -955,8 +985,9 @@ QStringList HumanControlPanel::PendingSpawnPoints() const
   QStringList result;
   for (const auto &point : this->pendingSpawnPoints)
   {
-    result << QString("%1, %2")
-        .arg(point.first, 0, 'f', 2).arg(point.second, 0, 'f', 2);
+    result << QString("%1, %2, %3")
+        .arg(point.x, 0, 'f', 2).arg(point.y, 0, 'f', 2)
+        .arg(point.z, 0, 'f', 2);
   }
   return result;
 }
@@ -1612,11 +1643,20 @@ void HumanControlPanel::spawnHumans(
     const QString name = baseName + QString::number(offset + i + 1);
     double x = 0.0;
     double y = 0.0;
+    // Typed coordinates treat the form's z as an absolute world height,
+    // which is what it has always meant. A picked point instead treats it
+    // as the model's ground offset (defaultZ(): 1.0 for walking_actor,
+    // 0.0 for DoctorFemaleWalk, ...) and adds it to the height of the
+    // surface that was clicked -- that sum is what puts the human on top
+    // of the floor they were dropped on, on any storey.
+    double z = _z;
     if (usePicked)
     {
       // Exactly where each one was clicked.
-      x = points[static_cast<std::size_t>(i)].first;
-      y = points[static_cast<std::size_t>(i)].second;
+      const auto &point = points[static_cast<std::size_t>(i)];
+      x = point.x;
+      y = point.y;
+      z = point.z + _z;
     }
     else
     {
@@ -1630,7 +1670,7 @@ void HumanControlPanel::spawnHumans(
       x = _x + (i % kSpawnGridColumns) * kSpawnGridSpacing;
       y = _y + (i / kSpawnGridColumns) * kSpawnGridSpacing;
     }
-    this->spawnHuman(_modelIndex, name, _posePreset, _followMode, x, y, _z, _yaw);
+    this->spawnHuman(_modelIndex, name, _posePreset, _followMode, x, y, z, _yaw);
   }
 
   if (usePicked)
@@ -3124,7 +3164,7 @@ bool HumanControlPanel::EnsureUserCamera(const gz::rendering::ScenePtr &_scene)
 
 gz::rendering::VisualPtr HumanControlPanel::CreateMarkerVisual(
     const gz::rendering::ScenePtr &_scene, const std::string &_name,
-    double _x, double _y, int _colorIndex, bool _pending) const
+    double _x, double _y, double _z, int _colorIndex, bool _pending) const
 {
   if (!_scene)
     return nullptr;
@@ -3149,19 +3189,34 @@ gz::rendering::VisualPtr HumanControlPanel::CreateMarkerVisual(
       g = color[1];
       b = color[2];
     }
+    if (!this->spawnMarkerTexturePath.empty())
+    {
+      material->SetTexture(this->spawnMarkerTexturePath);
+      // Without this the PNG's alpha is ignored and the marker renders as
+      // an opaque square instead of a circle.
+      material->SetAlphaFromTexture(true);
+    }
+    // The texture is white, so these tint it rather than replace it.
     material->SetAmbient(r, g, b, alpha);
     material->SetDiffuse(r, g, b, alpha);
-    // Emissive as well as diffuse so the disc keeps its identity colour in
-    // shadow -- it's a label, and a label that goes dark under a table is
-    // no longer telling anyone which person it belongs to.
-    material->SetEmissive(r * 0.6, g * 0.6, b * 0.6);
+    // Emissive as well as diffuse so the circle keeps its identity colour
+    // in shadow -- it's a label, and a label that goes dark under a table
+    // is no longer telling anyone which person it belongs to.
+    // Emissive at full tint rather than a fraction of it: these worlds are
+    // scanned building interiors that are dimly lit, and a marker relying
+    // on diffuse alone reads as a grey smudge indoors. Self-lighting it
+    // makes the circle look the same on a dark floor as on a bright one.
+    material->SetEmissive(r, g, b);
     material->SetTransparency(1.0 - alpha);
     // Without this the transparency above is ignored by ogre2.
     material->SetDepthWriteEnabled(false);
     material->SetCastShadows(false);
   }
 
-  auto geometry = _scene->CreateCylinder();
+  // One textured plane rather than a disc built from primitives: the whole
+  // design (rings, seal, ticks) lives in the texture, so a world full of
+  // markers costs one quad each.
+  auto geometry = _scene->CreatePlane();
   if (!geometry)
   {
     _scene->DestroyVisual(visual);
@@ -3170,9 +3225,11 @@ gz::rendering::VisualPtr HumanControlPanel::CreateMarkerVisual(
   if (material)
     geometry->SetMaterial(material);
   visual->AddGeometry(geometry);
-  // Unit cylinder scaled into a flat disc lying on the floor.
-  visual->SetLocalScale(kMarkerRadius * 2.0, kMarkerRadius * 2.0, kMarkerThickness);
-  visual->SetLocalPosition(_x, _y, kMarkerZ);
+  // CreatePlane() is already a unit quad in XY, the orientation a floor
+  // marker wants; only size and height need setting. kMarkerZ lifts it
+  // clear of the slab so it does not z-fight with the floor.
+  visual->SetLocalScale(kMarkerRadius * 2.0, kMarkerRadius * 2.0, 1.0);
+  visual->SetLocalPosition(_x, _y, _z + kMarkerZ);
   // Purely decorative: never let a click in the 3D view select the marker
   // instead of what's behind it (that click is how spawn points and route
   // points get placed in the first place -- see eventFilter()).
@@ -3205,7 +3262,8 @@ void HumanControlPanel::ApplySpawnMarkers()
     {
       human.markerVisual = this->CreateMarkerVisual(
           scene, "__spawn_marker_" + human.name,
-          human.spawnX, human.spawnY, human.markerColorIndex, false);
+          human.spawnX, human.spawnY, human.spawnZ,
+          human.markerColorIndex, false);
       if (!human.markerVisual)
         continue;
       // A freshly created visual is visible; force the desired state to be
@@ -3239,9 +3297,30 @@ void HumanControlPanel::ApplySpawnMarkers()
     {
       this->pendingSpawnMarkerVisuals.push_back(this->CreateMarkerVisual(
           scene, "__spawn_pending_" + std::to_string(i),
-          this->pendingSpawnPoints[i].first, this->pendingSpawnPoints[i].second,
-          0, true));
+          this->pendingSpawnPoints[i].x, this->pendingSpawnPoints[i].y,
+          this->pendingSpawnPoints[i].z, 0, true));
     }
+  }
+
+  // Spin every marker together. Driven from elapsed wall time rather than
+  // a per-frame increment so the rate does not follow the GUI's frame rate.
+  if (!this->spawnMarkerEpochValid)
+  {
+    this->spawnMarkerEpoch = std::chrono::steady_clock::now();
+    this->spawnMarkerEpochValid = true;
+  }
+  const double angle = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - this->spawnMarkerEpoch).count()
+      * kMarkerSpinRate;
+  for (auto &human : this->humans)
+  {
+    if (human.markerVisual)
+      human.markerVisual->SetLocalRotation(0.0, 0.0, angle);
+  }
+  for (auto &visual : this->pendingSpawnMarkerVisuals)
+  {
+    if (visual)
+      visual->SetLocalRotation(0.0, 0.0, angle);
   }
 }
 

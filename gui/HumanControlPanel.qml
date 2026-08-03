@@ -267,6 +267,15 @@ Rectangle {
     }
     Label {
       Layout.fillWidth: true
+      visible: placeByClickRadio.checked && HumanControlPanel.spawnPicking
+      wrapMode: Text.Wrap
+      text: "クリックした地点に魔法陣が出ます．上の階の床をクリックすれば，" +
+            "その階の高さに配置されます（下のリストの3つ目の数字が高さ）．"
+      color: "#8aa19c"
+      font.pixelSize: 11
+    }
+    Label {
+      Layout.fillWidth: true
       visible: placeByClickRadio.checked
       text: "選択中の地点: " + HumanControlPanel.pendingSpawnPoints.length + "地点" +
           (HumanControlPanel.pendingSpawnPoints.length > 0

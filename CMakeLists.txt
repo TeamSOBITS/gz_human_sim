@@ -124,6 +124,11 @@ install(DIRECTORY
   config
   gui
   launch
+  # media/: the magic-circle texture HumanControlPanel maps onto its spawn
+  # markers. guide_robot ships an identical copy for its own robot spawn
+  # marker; regenerate both with
+  # `ros2 run guider_multifloor_builder guider_make_spawn_marker`.
+  media
   models
   rviz
   scripts

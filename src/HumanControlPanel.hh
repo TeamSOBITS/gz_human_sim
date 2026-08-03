@@ -999,6 +999,17 @@ class HumanControlPanel : public gz::gui::Plugin
   /// this feature existed.
   private: std::string collisionBodyTemplate;
 
+  /// \brief Absolute path to media/spawn_marker.png (the magic-circle
+  /// texture), resolved once in LoadConfig() the same way
+  /// collisionBodyTemplate's path is. Empty if it could not be found, in
+  /// which case markers fall back to a plain tinted plane.
+  private: std::string spawnMarkerTexturePath;
+
+  /// \brief Time the spin angle of every marker is derived from, so they
+  /// rotate together at a rate independent of the GUI's frame rate.
+  private: std::chrono::steady_clock::time_point spawnMarkerEpoch;
+  private: bool spawnMarkerEpochValid{false};
+
   /// \brief Advertises sfmRegisterPublisher/sfmUnregisterPublisher on first
   /// use (not in the constructor: worldName isn't known yet there, and
   /// these topics are fixed/global rather than per-world, but deferring
@@ -1054,11 +1065,15 @@ class HumanControlPanel : public gz::gui::Plugin
   /// entity tree -- see setShowSpawnMarker().
   private: void ApplySpawnMarkers();
 
-  /// \brief Creates one flat coloured disc visual named _name at
-  /// (_x, _y), or nullptr if the scene won't build it.
+  /// \brief Creates one flat magic-circle marker visual named _name at
+  /// (_x, _y, _z), or nullptr if the scene won't build it. A single
+  /// texture-mapped plane rather than a pile of primitives, so a world
+  /// full of markers stays cheap; the texture is drawn white and tinted
+  /// here (translucent white while a point is only pending, the human's
+  /// own identity colour once it exists).
   private: gz::rendering::VisualPtr CreateMarkerVisual(
       const gz::rendering::ScenePtr &_scene, const std::string &_name,
-      double _x, double _y, int _colorIndex, bool _pending) const;
+      double _x, double _y, double _z, int _colorIndex, bool _pending) const;
 
   /// \brief Finds (and caches) the GUI user camera in _scene. Render thread
   /// only. Split out of ApplyViewpoint() so the per-frame camera-position
@@ -1124,7 +1139,21 @@ class HumanControlPanel : public gz::gui::Plugin
 
   /// \brief Spawn points picked by clicking the 3D view, awaiting a Spawn
   /// press -- see the pendingSpawnPoints Q_PROPERTY's comment.
-  private: std::vector<std::pair<double, double>> pendingSpawnPoints;
+  ///
+  /// Z is carried alongside X/Y because the click that places a point
+  /// reports the height of whatever it landed on, and in a multi-storey
+  /// world that is the whole point: clicking the 4F slab has to spawn the
+  /// human on 4F. These used to be (x, y) pairs, so every picked point
+  /// silently fell back to the spawn form's own z and everyone ended up
+  /// on the ground floor. See spawnHumans() for how it combines with the
+  /// form's per-model ground offset.
+  private: struct PickedPoint
+  {
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
+  };
+  private: std::vector<PickedPoint> pendingSpawnPoints;
 
   /// \brief Render-scene visuals for pendingSpawnPoints (rebuilt whenever
   /// the list length changes) and the names of markers whose human has been
