@@ -16,16 +16,25 @@
   <depend>python3-yaml</depend>
   <depend>ros_gz_sim</depend>
   <depend>ros_gz_interfaces</depend>
-  <depend>gz-plugin2</depend>
-  <depend>gz-sim8</depend>
-  <depend>gz-msgs10</depend>
-  <depend>gz-transport13</depend>
-  <depend>gz-gui8</depend>
-  <depend>gz-rendering8</depend>
+  <!-- The *_vendor keys are the ones rosdep knows on Jazzy; the bare
+       library names (gz-sim8 etc.) are what CMake's find_package() wants
+       but are not rosdep keys, so declaring those made `rosdep install`
+       report "Cannot locate rosdep definition" and skip Gazebo entirely
+       on a machine that did not already have it. -->
+  <depend>gz_plugin_vendor</depend>
+  <depend>gz_sim_vendor</depend>
+  <depend>gz_msgs_vendor</depend>
+  <depend>gz_transport_vendor</depend>
+  <depend>gz_gui_vendor</depend>
+  <depend>gz_rendering_vendor</depend>
   <depend>qtbase5-dev</depend>
   <depend>qtdeclarative5-dev</depend>
   <depend>boost</depend>
-  <depend>libsdl2-dev</depend>
+  <!-- rosdep key is "sdl2"; it resolves to the libsdl2-dev apt package.
+       Spelling the apt name here instead makes `rosdep install` fail with
+       "Cannot locate rosdep definition", which on a fresh machine means
+       SDL2 never gets installed and the build stops at find_package(SDL2). -->
+  <depend>sdl2</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
