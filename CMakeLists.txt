@@ -79,9 +79,22 @@ target_link_libraries(gz_human_nav_grid_system
 # GUI plugin: spawns/removes/teleoperates gz_human_sim humans from the
 # Gazebo sidebar. Kept in its own lib/gz-gui search path, separate from
 # the gz-sim System plugins above (see GZ_GUI_PLUGIN_PATH env-hook below).
+# The implementation is split across one .cc per responsibility (all the
+# same HumanControlPanel class -- see src/gui/HumanControlPanelInternal.hh
+# for the tables and constants they share), rather than the single
+# ~3700-line file this used to be.
 add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanel.cc
+  src/gui/HumanControlPanelCamera.cc
+  src/gui/HumanControlPanelCollision.cc
+  src/gui/HumanControlPanelDualsense.cc
+  src/gui/HumanControlPanelInput.cc
+  src/gui/HumanControlPanelOverlay.cc
+  src/gui/HumanControlPanelRoute.cc
+  src/gui/HumanControlPanelSpawn.cc
+  src/gui/HumanControlPanelTeleop.cc
   src/gui/HumanControlPanel.hh
+  src/gui/HumanControlPanelInternal.hh
   gui/HumanControlPanel.qrc
 )
 target_compile_features(HumanControlPanel PUBLIC cxx_std_17)
