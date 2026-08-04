@@ -756,6 +756,16 @@ Rectangle {
         color: HumanControlPanel.dualsenseModeEnabled ? "#126e68" : "#8aa19c"
       }
     }
+    // 既定は「上に倒すと見上げる」(据置ゲーム機の標準)。以前は逆
+    // (フライトシム式)で固定だったので、その挙動が好みならここをON。
+    // GuiderRobotManager 側の同名設定と挙動を揃えてある。
+    CheckBox {
+      visible: HumanControlPanel.dualsenseModeEnabled
+      text: "視点の上下を反転（上に倒すと見下ろす）"
+      font.pixelSize: 12
+      checked: HumanControlPanel.invertCameraY
+      onToggled: HumanControlPanel.invertCameraY = checked
+    }
     Label {
       Layout.fillWidth: true
       visible: HumanControlPanel.dualsenseModeEnabled

@@ -192,6 +192,19 @@ class HumanControlPanel : public gz::gui::Plugin
   /// (e.g. "DualSense Wireless Controller 接続中" / "コントローラが見つかりません").
   Q_PROPERTY(QString dualsenseStatusText READ DualsenseStatusText NOTIFY dualsenseStatusChanged)
 
+  /// \brief Right-stick vertical direction for the orbit camera. Off (the
+  /// default) is the third-person convention every console game ships
+  /// with: push the stick up and the camera swings down so you look up.
+  /// On restores the flight-sim sense -- push up, look down -- which is
+  /// what this panel did unconditionally before the flag existed. Kept
+  /// identical to GuiderRobotManager's flag of the same name so the two
+  /// panels never disagree about which way the stick goes.
+  Q_PROPERTY(
+    bool invertCameraY
+    READ InvertCameraY
+    WRITE SetInvertCameraY
+    NOTIFY invertCameraYChanged)
+
   public: HumanControlPanel();
   public: ~HumanControlPanel() override;
 
@@ -228,6 +241,8 @@ class HumanControlPanel : public gz::gui::Plugin
   public: bool DualsenseModeEnabled() const;
   public: void SetDualsenseModeEnabled(bool _enabled);
   public: QString DualsenseStatusText() const;
+  public: bool InvertCameraY() const;
+  public: void SetInvertCameraY(bool _enabled);
 
   /// \brief Suggested spawn name for a model index ("human1", "human2", …).
   public: Q_INVOKABLE QString defaultName(int _modelIndex) const;
@@ -921,6 +936,21 @@ class HumanControlPanel : public gz::gui::Plugin
   private: void OnPoseInfo(const gz::msgs::Pose_V &_message);
 
   private: gz::transport::Node node;
+
+  /// \brief Announces this panel's humans so GuiderPadController (a
+  /// plugin in the separate guide_robot package, which may not be loaded
+  /// at all) can drive them with the same pad as the robots.
+  ///
+  /// The topic name and the '|'-separated line format are specified by
+  /// guide_robot's `src/GuiderTargetRoster.hh`. It is duplicated here
+  /// rather than included because gz_human_sim must not gain a build
+  /// dependency on guide_robot -- so any change to that format has to be
+  /// mirrored in PublishRoster() below.
+  private: gz::transport::Node::Publisher rosterPublisher;
+
+  private: void PublishRoster();
+
+  private: QTimer *rosterTimer{nullptr};
   private: std::vector<Human> humans;
   private: std::string worldName;
   private: QString statusText{"ワールドを検出中…"};
@@ -1184,6 +1214,7 @@ class HumanControlPanel : public gz::gui::Plugin
   /// CloseDualsenseController() and the destructor.
   private: _SDL_GameController *dualsenseController{nullptr};
   private: bool dualsenseModeState{false};
+  private: bool invertCameraYState{false};
   private: QString dualsenseStatusTextState{"未接続"};
 
   /// \brief True while the left stick was driving activeHumanIndex on the
@@ -1224,6 +1255,7 @@ class HumanControlPanel : public gz::gui::Plugin
   signals: void speedMultiplierChanged();
   signals: void dualsenseModeChanged();
   signals: void dualsenseStatusChanged();
+  signals: void invertCameraYChanged();
 };
 }  // namespace gz_human_sim
 #endif

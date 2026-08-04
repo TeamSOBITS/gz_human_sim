@@ -419,6 +419,77 @@ static void ThisLibraryAnchor()
 HumanControlPanel::HumanControlPanel()
   : gz::gui::Plugin()
 {
+  // The roster goes out whenever the list changes (so the pad reacts to a
+  // spawn immediately) and every 2s regardless (so a pad controller that
+  // was loaded after the humans were spawned still learns about them --
+  // gz-transport has no retained-message/latching semantics to lean on).
+  this->rosterPublisher =
+      this->node.Advertise<gz::msgs::StringMsg_V>("/guider/targets/humans");
+  QObject::connect(
+      this, &HumanControlPanel::humansChanged,
+      this, &HumanControlPanel::PublishRoster);
+  this->rosterTimer = new QTimer(this);
+  this->rosterTimer->setInterval(2000);
+  QObject::connect(
+      this->rosterTimer, &QTimer::timeout,
+      this, &HumanControlPanel::PublishRoster);
+  this->rosterTimer->start();
+}
+
+void HumanControlPanel::PublishRoster()
+{
+  if (!this->rosterPublisher.Valid())
+    return;
+
+  gz::msgs::StringMsg_V message;
+  for (const auto &human : this->humans)
+  {
+    // Only actor-backed humans have a velocity publisher, and only they
+    // can be driven -- see spawnHumans(). A human without one would
+    // silently swallow every Twist the pad sent.
+    if (!human.velocityPublisher.Valid())
+      continue;
+
+    // Only pose-capable actors have a cmd_pose publisher (see
+    // IsPoseCapableIndex()); for the rest the channel stays empty and the
+    // pad's ○△×□ do nothing rather than publishing into the void.
+    std::string poseChannel;
+    std::string poses[4] = {"", "", "", ""};
+    if (human.posePublisher.Valid())
+    {
+      poseChannel = "gztopic:/" + human.name + "/cmd_pose";
+      // Bound only if the loaded human_pose_presets.yaml actually defines
+      // them -- that file is the user's to edit, so a hardcoded name can
+      // go stale, and UpdatePoseIntent() would then publish a pose the
+      // actor plugin does not know.
+      const char *const preferred[4] = {
+        "raise_right_hand", "cross_arms", "initial_pose", "sit_on_chair"};
+      for (int i = 0; i < 4; ++i)
+      {
+        if (this->posePresetList.contains(QString(preferred[i])))
+          poses[i] = preferred[i];
+      }
+    }
+
+    // kind|type|name|cmdVelTopic|holonomic|yawSign|maxLinear|maxAngular
+    //   |poseChannel|pose1|pose2|pose3|pose4|label
+    // `type` is empty for humans: it keys guide_robot's joint table, which
+    // only covers robot arms.
+    // -- format owned by guide_robot's src/GuiderTargetRoster.hh; see the
+    // rosterPublisher comment in the header. Humans strafe (holonomic=1)
+    // and need no yaw correction (yawSign=1). The speeds are the same
+    // constants PollDualsense() applies, before speedMultiplier: that is a
+    // live slider, and baking its current value into a 2s-stale roster
+    // entry would make the pad drive at whatever it was two seconds ago.
+    message.add_data(
+        "human||" + human.name + "|/" + human.name + "/cmd_vel|1|1.000000|" +
+        std::to_string(kTeleopSpeed) + "|" +
+        std::to_string(kTeleopTurnRate) + "|" + poseChannel + "|" +
+        poses[0] + "|" + poses[1] + "|" + poses[2] + "|" + poses[3] +
+        "|" + human.name + "（人物）");
+  }
+
+  this->rosterPublisher.Publish(message);
 }
 
 HumanControlPanel::~HumanControlPanel()
@@ -1012,6 +1083,19 @@ void HumanControlPanel::SetDualsenseModeEnabled(bool _enabled)
 QString HumanControlPanel::DualsenseStatusText() const
 {
   return this->dualsenseStatusTextState;
+}
+
+bool HumanControlPanel::InvertCameraY() const
+{
+  return this->invertCameraYState;
+}
+
+void HumanControlPanel::SetInvertCameraY(bool _enabled)
+{
+  if (this->invertCameraYState == _enabled)
+    return;
+  this->invertCameraYState = _enabled;
+  this->invertCameraYChanged();
 }
 
 bool HumanControlPanel::ActiveSfmEnabled() const
@@ -3605,8 +3689,13 @@ void HumanControlPanel::ApplyDualsenseOrbit(double _rightX, double _rightY)
   constexpr double kOrbitRate = 1.5;
   constexpr double kPitchLimit = 1.3;
   this->dualsenseOrbitYaw -= _rightX * kOrbitRate * dt;
+  // SDL reports stick-up as a negative Y. Adding it therefore lowers the
+  // pitch, swinging the camera down and its gaze up -- the third-person
+  // default. invertCameraY flips back to the flight-sim sense; see the
+  // Q_PROPERTY comment.
+  const double pitchSign = this->invertCameraYState ? -1.0 : 1.0;
   this->dualsenseOrbitPitch = std::clamp(
-      this->dualsenseOrbitPitch - _rightY * kOrbitRate * dt,
+      this->dualsenseOrbitPitch + pitchSign * _rightY * kOrbitRate * dt,
       -kPitchLimit, kPitchLimit);
 
   // Spherical offset around the human's local frame (worldFrame = false,
