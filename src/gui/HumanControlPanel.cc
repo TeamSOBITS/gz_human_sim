@@ -130,7 +130,7 @@ void HumanControlPanel::PublishRoster()
 HumanControlPanel::~HumanControlPanel()
 {
   for (auto &human : this->humans)
-    this->TerminateProcessGroup(human.process);
+    launch_process::TerminateGroup(this, human.process);
 }
 
 void HumanControlPanel::LoadConfig(const tinyxml2::XMLElement *)

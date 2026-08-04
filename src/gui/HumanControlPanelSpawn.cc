@@ -41,6 +41,8 @@
 
 
 #include "HumanControlPanelInternal.hh"
+#include "LaunchProcess.hh"
+#include "WorldEntityService.hh"
 
 // Spawn/removal pipeline: launch-process management, the collision probe
 // that finds a clear spawn position, and entity-existence confirmation.
@@ -50,113 +52,6 @@
 
 namespace gz_human_sim
 {
-QProcess *HumanControlPanel::StartLaunchProcess(const QStringList &_arguments)
-{
-  auto *process = new QProcess(this);
-  // setsid makes the child (ros2 launch, plus every node it spawns) its
-  // own process group, so TerminateProcessGroup() can signal all of them
-  // at once on removal instead of leaving orphaned bridge/spawn nodes
-  // behind. Same pattern as guide_robot's GuiderRobotManager.
-  process->setProgram("setsid");
-  process->setArguments(QStringList{"ros2"} + _arguments);
-  process->setStandardOutputFile(QProcess::nullDevice());
-  process->setStandardErrorFile(QProcess::nullDevice());
-  process->start();
-  if (!process->waitForStarted(3000))
-  {
-    process->deleteLater();
-    return nullptr;
-  }
-  return process;
-}
-
-void HumanControlPanel::TerminateProcessGroup(QProcess *_process)
-{
-  if (!_process)
-    return;
-  const qint64 pid = _process->processId();
-  if (pid > 0)
-  {
-    ::kill(static_cast<pid_t>(-pid), SIGINT);
-    QTimer::singleShot(4000, this, [pid]()
-    {
-      if (::kill(static_cast<pid_t>(-pid), 0) == 0)
-        ::kill(static_cast<pid_t>(-pid), SIGTERM);
-    });
-    QTimer::singleShot(8000, this, [pid]()
-    {
-      if (::kill(static_cast<pid_t>(-pid), 0) == 0)
-        ::kill(static_cast<pid_t>(-pid), SIGKILL);
-    });
-  }
-  QTimer::singleShot(9000, this, [guard = QPointer<QProcess>(_process)]()
-  {
-    if (guard)
-      guard->deleteLater();
-  });
-}
-
-void HumanControlPanel::RequestEntityRemoval(const std::string &_name)
-{
-  gz::msgs::Entity request;
-  request.set_name(_name);
-  request.set_type(gz::msgs::Entity::MODEL);
-
-  const std::string service = "/world/" + this->worldName + "/remove";
-  std::function<void(const gz::msgs::Boolean &, const bool)> callback =
-      [](const gz::msgs::Boolean &, const bool) { /* fire and forget */ };
-  this->node.Request(service, request, callback);
-}
-
-void HumanControlPanel::RequestEntityCreation(const std::string &_sdf,
-    const std::string &_name, double _x, double _y, double _z)
-{
-  gz::msgs::EntityFactory request;
-  request.set_sdf(_sdf);
-  request.set_name(_name);
-  request.mutable_pose()->mutable_position()->set_x(_x);
-  request.mutable_pose()->mutable_position()->set_y(_y);
-  request.mutable_pose()->mutable_position()->set_z(_z);
-
-  const std::string service = "/world/" + this->worldName + "/create";
-  // Fire and forget, same as RequestEntityRemoval() above -- if this
-  // fails, ActorCommandPlugin simply keeps not finding a collision entity
-  // by name (same as before the human_collision_body companion first
-  // spawns) rather than anything crashing, so there's nothing useful to
-  // do with a failure callback here.
-  std::function<void(const gz::msgs::Boolean &, const bool)> callback =
-      [](const gz::msgs::Boolean &, const bool) { /* fire and forget */ };
-  this->node.Request(service, request, callback);
-}
-
-bool HumanControlPanel::QueryEntityExists(const std::string &_name)
-{
-  if (this->worldName.empty())
-    return false;
-  // /world/<w>/scene/info and the `gz model` CLI only enumerate MODEL-type
-  // entities -- actors (what every human_model this panel spawns actually
-  // is) are a distinct entity kind in gz-sim's ECS and never show up
-  // there, spawned-at-load-time or not (verified: even `gz model -m
-  // <name> -p` reports "No model named <name> was found" for a live,
-  // just-spawned, teleoperable actor). /world/<w>/state is the one
-  // service that does include actors -- its response is the raw
-  // serialized ECS component set, so rather than hand-walking gz-sim's
-  // component type IDs to decode it, this just substring-searches the
-  // serialized bytes for the entity's Name component string. Good enough
-  // for an existence check: after a real removal every component
-  // mentioning that name (Name, the plugin's own vel_topic/path_topic
-  // strings, ...) is gone from the ECS too.
-  gz::msgs::Empty request;
-  gz::msgs::SerializedStepMap response;
-  bool result = false;
-  const bool executed = this->node.Request(
-      "/world/" + this->worldName + "/state", request,
-      kStateQueryTimeoutMs, response, result);
-  if (!executed || !result)
-    return false;
-  const std::string serialized = response.SerializeAsString();
-  return serialized.find(_name) != std::string::npos;
-}
 
 void HumanControlPanel::spawnHuman(
     int _modelIndex, const QString &_name, const QString &_posePreset,
@@ -190,7 +85,7 @@ void HumanControlPanel::spawnHuman(
   // silently corrupts gz-sim's name lookup -- both copies become
   // unfindable by name afterward, which is what made removal fail. Refuse
   // instead of reproducing that.
-  if (this->QueryEntityExists(nameStd))
+  if (world_entity::Exists(this->node, this->worldName, nameStd))
   {
     this->SetStatus(name + " は既にワールドに存在します。別名にするか、"
         "先にGazeboを再起動してゴーストエンティティを解消してください");
@@ -305,7 +200,7 @@ void HumanControlPanel::StartRealSpawn(
   if (IsActorIndex(_modelIndex) && !_followMode.isEmpty())
     arguments << "follow_mode:=" + _followMode;
 
-  auto *process = this->StartLaunchProcess(arguments);
+  auto *process = launch_process::Start(this, arguments);
   if (!process)
   {
     this->SetStatus(_name + " の起動に失敗しました");
@@ -546,7 +441,7 @@ void HumanControlPanel::CheckProbeSettle(
   (void)_approachStartX;
   (void)_approachStartY;
   // Always clean up the probe, safe or not -- it was only ever a test.
-  this->RequestEntityRemoval(probeNameStd);
+  world_entity::Remove(this->node, this->worldName, probeNameStd);
 
   if (safe)
   {
@@ -577,7 +472,7 @@ void HumanControlPanel::PollProbeRemoval(
     int _pollAttempt)
 {
   const std::string probeNameStd = _probeName.toStdString();
-  if (this->QueryEntityExists(probeNameStd) && _pollAttempt < kProbeRemovalMaxAttempts)
+  if (world_entity::Exists(this->node, this->worldName, probeNameStd) && _pollAttempt < kProbeRemovalMaxAttempts)
   {
     QTimer::singleShot(kProbeRemovalPollIntervalMs, this,
         [this, _probeName, _modelIndex, _name, _posePreset, _followMode,
@@ -601,14 +496,14 @@ void HumanControlPanel::PollSpawnConfirmation(
     double _x, double _y, double _z, double _yaw, int _attempt)
 {
   const std::string nameStd = _name.toStdString();
-  if (!this->QueryEntityExists(nameStd))
+  if (!world_entity::Exists(this->node, this->worldName, nameStd))
   {
     if (_attempt + 1 >= kEntityPollMaxAttempts)
     {
       this->SetStatus(_name + " のspawnに失敗しました（"
           + QString::number(kEntityPollMaxAttempts * kEntityPollIntervalMs / 1000)
           + "秒待っても見つかりません）");
-      this->TerminateProcessGroup(_process);
+      launch_process::TerminateGroup(this, _process);
       return;
     }
     QTimer::singleShot(kEntityPollIntervalMs, this,
@@ -744,10 +639,10 @@ void HumanControlPanel::removeHuman(int _index)
   if (this->humans.empty())
     this->resetToInitialView();
 
-  this->TerminateProcessGroup(human.process);
+  launch_process::TerminateGroup(this, human.process);
 
   const QString name = QString::fromStdString(human.name);
-  if (!this->QueryEntityExists(human.name))
+  if (!world_entity::Exists(this->node, this->worldName, human.name))
   {
     // Already gone (or never actually existed -- a ghost list entry from
     // an earlier collision): nothing to ask gz to remove, and doing so
@@ -760,14 +655,14 @@ void HumanControlPanel::removeHuman(int _index)
   if (human.removePublisher.Valid())
   {
     // Actor-backed human: /world/<w>/remove can't take an ACTOR (see
-    // RequestEntityRemoval()'s comment), so ask the actor's own
+    // world_entity::Remove() のコメント参照), so ask the actor's own
     // ActorCommandPlugin to remove itself via the ECM instead.
     gz::msgs::Empty message;
     human.removePublisher.Publish(message);
   }
   else
   {
-    this->RequestEntityRemoval(human.name);
+    world_entity::Remove(this->node, this->worldName, human.name);
   }
   this->SetStatus(name + " を削除中…（確認待ち）");
   QTimer::singleShot(kEntityPollIntervalMs, this,
@@ -777,7 +672,7 @@ void HumanControlPanel::removeHuman(int _index)
 void HumanControlPanel::PollRemovalConfirmation(QString _name, int _attempt)
 {
   const std::string nameStd = _name.toStdString();
-  if (!this->QueryEntityExists(nameStd))
+  if (!world_entity::Exists(this->node, this->worldName, nameStd))
   {
     this->SetStatus(_name + " を削除しました");
     return;

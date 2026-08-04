@@ -28,8 +28,10 @@
 #include "gz_human_sim/CharacterState.hh"
 #include "CameraController.hh"
 #include "CollisionBodyController.hh"
+#include "LaunchProcess.hh"
 #include "PathPlanner.hh"
 #include "PathTemplates.hh"
+#include "WorldEntityService.hh"
 #include "SpawnMarkerRenderer.hh"
 #include "HumanRegistry.hh"
 
@@ -485,34 +487,9 @@ class HumanControlPanel : public gz::gui::Plugin
 
   private: void DiscoverWorld();
   private: void SetStatus(const QString &_status);
-  private: QProcess *StartLaunchProcess(const QStringList &_arguments);
-  private: void TerminateProcessGroup(QProcess *_process);
 
-  /// \brief Request /world/<w>/remove (Entity::MODEL) for _name. Only valid
-  /// for MODEL-backed humans (person_standing, custom_human) -- gz-sim's
-  /// UserCommands system rejects ACTOR entities outright ("Entity [n] is
-  /// not a model or a light, so it can't be removed."), no matter what
-  /// Entity::Type is set on the request. Actor-backed humans are removed
-  /// via their own remove-topic instead (see removeHuman()).
-  private: void RequestEntityRemoval(const std::string &_name);
 
-  /// \brief Fire-and-forget /world/<w>/create request for a MODEL entity
-  /// (gz::msgs::EntityFactory: _sdf as the raw SDF text, _name as the
-  /// entity name, position only -- capsules are rotationally symmetric
-  /// about Z so no orientation is needed). Same request shape
-  /// ProbeSafeSpawnPosition() already builds inline for its throwaway
-  /// probes; pulled out here since applyCollisionSize() needs the same
-  /// call for a real (non-probe) respawn.
-  private: void RequestEntityCreation(const std::string &_sdf,
-      const std::string &_name, double _x, double _y, double _z);
 
-  /// \brief Synchronous, short-timeout query of /world/<w>/scene/info for
-  /// whether a model named _name currently exists. Used instead of trusting
-  /// spawn/remove service acks (gz-sim's create/remove services both return
-  /// success at the request-acceptance level even when the entity was never
-  /// actually inserted/found — the real truth only shows up in the scene
-  /// graph, or as a [Err] line in the server's own log).
-  private: bool QueryEntityExists(const std::string &_name);
 
   /// \brief spawnHuman()'s original body (build launch arguments, start
   /// the process, poll for confirmation) -- now only reached once _x/_y

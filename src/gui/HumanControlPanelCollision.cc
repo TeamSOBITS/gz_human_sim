@@ -9,6 +9,7 @@
 #include <gz/rendering/RenderingIface.hh>
 
 #include "HumanControlPanelInternal.hh"
+#include "WorldEntityService.hh"
 
 // 当たり判定カプセルの QML 窓口と、人物ごとの表示状態の管理。
 //
@@ -109,7 +110,7 @@ void HumanControlPanel::applyCollisionSize(int _index, double _radius, double _l
   const std::string sdf =
       this->collisionBody.BuildSdf(collisionModelName, _radius, _length);
 
-  this->RequestEntityRemoval(collisionModelName);
+  world_entity::Remove(this->node, this->worldName, collisionModelName);
   // The replacement model brings brand-new scene visuals with it, which
   // start out visible regardless of what this human's toggle says -- reset
   // to "nothing applied yet" so ApplyCollisionVisibility() pushes the
@@ -127,7 +128,8 @@ void HumanControlPanel::applyCollisionSize(int _index, double _radius, double _l
   QTimer::singleShot(500, this,
       [this, sdf, collisionModelName, x, y, z]()
       {
-        this->RequestEntityCreation(sdf, collisionModelName, x, y, z);
+        world_entity::Create(this->node, this->worldName, sdf,
+            collisionModelName, x, y, z);
       });
   this->SetStatus(QString::fromStdString(human.name) +
       " の当たり判定サイズを変更しました（半径" + QString::number(_radius, 'f', 2) +

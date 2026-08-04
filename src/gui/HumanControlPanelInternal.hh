@@ -108,7 +108,6 @@ inline constexpr int kProbeRemovalMaxAttempts = 20;
 // /world/<w>/state instead of trusting the ack. 20 * 500ms = 10s.
 inline constexpr int kEntityPollIntervalMs = 500;
 inline constexpr int kEntityPollMaxAttempts = 20;
-inline constexpr unsigned int kStateQueryTimeoutMs = 800u;
 
 
 

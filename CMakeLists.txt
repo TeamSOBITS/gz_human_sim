@@ -91,13 +91,21 @@ add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanelRoute.cc
   src/gui/HumanControlPanelSpawn.cc
   src/gui/HumanControlPanelState.cc
+  src/gui/LaunchProcess.cc
+  src/gui/PathPlanner.cc
+  src/gui/PathTemplates.cc
   src/gui/SpawnMarkerRenderer.cc
+  src/gui/WorldEntityService.cc
   src/gui/CameraController.hh
   src/gui/CollisionBodyController.hh
   src/gui/HumanControlPanel.hh
   src/gui/HumanRegistry.hh
   src/gui/HumanControlPanelInternal.hh
+  src/gui/LaunchProcess.hh
+  src/gui/PathPlanner.hh
+  src/gui/PathTemplates.hh
   src/gui/SpawnMarkerRenderer.hh
+  src/gui/WorldEntityService.hh
   gui/HumanControlPanel.qrc
 )
 target_compile_features(HumanControlPanel PUBLIC cxx_std_17)
