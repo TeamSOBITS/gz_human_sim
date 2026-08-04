@@ -52,6 +52,29 @@
 //
 // Split out of the single-file HumanControlPanel.cc; the code below is
 // unchanged from that file.
+//
+// ---------------------------------------------------------------------------
+// このファイルは大半が unified_entity_control へ移管予定です
+// ---------------------------------------------------------------------------
+// 移管先: unified_entity_control/src/CommandDispatcher.{hh,cc}
+//   teleopMove() / teleopStop() / teleopJump() / teleopRotate() /
+//   PublishTurnToFace() / EffectiveSpeedMultiplier() /
+//   PressDirectionKey() / ReleaseDirectionKey() / ApplyHeldDirectionKeys() /
+//   RefreshHeldMovementSpeed()
+//
+// 移管しないもの（gz_human_sim に残る）:
+//   togglePoseLock() / EffectivePose() / UpdatePoseIntent()
+//   -- 姿勢は「人物がいまどういう状態か」であって操作手段ではないため。
+//      構想書 §3 のとおり、状態はいずれサーバー側（gz-sim の System
+//      プラグイン）へ移します。
+//
+// 移管時に引き継ぐべき仕様は unified_entity_control/src/CommandDispatcher.hh
+// のコメントに書いてあります（停止は 0 Twist を 1 回だけ、turn-to-face は
+// 別形状の Twist、速度倍率は publish のたびに読み直す）。
+//
+// それまでは、このファイルはこのまま動き続けます。先に消さないでください。
+// 経緯は 構想書/gz_human_sim再設計構想.md §11 を参照。
+// ---------------------------------------------------------------------------
 
 namespace gz_human_sim
 {
