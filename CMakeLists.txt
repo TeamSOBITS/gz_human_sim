@@ -94,6 +94,7 @@ add_library(HumanControlPanel SHARED
   src/gui/LaunchProcess.cc
   src/gui/PathPlanner.cc
   src/gui/PathTemplates.cc
+  src/gui/SfmBridge.cc
   src/gui/SpawnMarkerRenderer.cc
   src/gui/WorldEntityService.cc
   src/gui/CameraController.hh
@@ -104,6 +105,7 @@ add_library(HumanControlPanel SHARED
   src/gui/LaunchProcess.hh
   src/gui/PathPlanner.hh
   src/gui/PathTemplates.hh
+  src/gui/SfmBridge.hh
   src/gui/SpawnMarkerRenderer.hh
   src/gui/WorldEntityService.hh
   gui/HumanControlPanel.qrc

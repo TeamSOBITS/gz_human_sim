@@ -31,6 +31,7 @@
 #include "LaunchProcess.hh"
 #include "PathPlanner.hh"
 #include "PathTemplates.hh"
+#include "SfmBridge.hh"
 #include "WorldEntityService.hh"
 #include "SpawnMarkerRenderer.hh"
 #include "HumanRegistry.hh"
@@ -118,7 +119,7 @@ class HumanControlPanel : public gz::gui::Plugin
   // batch-spawning a crowd, recording a route by clicking in the 3D view,
   // and choosing per-human whether that route is driven by the Social
   // Force Model (avoids other humans/robots/walls, registered with
-  // SfmCrowdSystem over gz-transport -- see EnsureSfmPublishers()) or by
+  // SfmCrowdSystem over gz-transport -- see SfmBridge) or by
   // the existing plain path-follow (cmd_path, no avoidance -- the same
   // mechanism sendWaypoint() already uses).
   //
@@ -158,7 +159,7 @@ class HumanControlPanel : public gz::gui::Plugin
   Q_PROPERTY(bool activeSfmEnabled READ ActiveSfmEnabled NOTIFY sfmModeChanged)
   // Whether the world actually has an SfmCrowdSystem loaded (detected by
   // looking for a subscriber on the register topic -- see
-  // SfmSystemAvailable()). Worlds that don't load it, which is most of them
+  // SfmBridge::Available()). Worlds that do not load it, which is most of them
   // (only gz_human_sim's own sfm_crowd_demo.world does), silently swallowed
   // every SFM route registration: the panel published, nothing subscribed,
   // and the human just stood there. The QML uses this to warn instead.
@@ -694,13 +695,6 @@ class HumanControlPanel : public gz::gui::Plugin
   /// 将来 guide_robot と共通の GUI 基盤パッケージへ出す予定（構想書 §12）。
   private: SpawnMarkerRenderer spawnMarkers;
 
-  /// \brief Advertises sfmRegisterPublisher/sfmUnregisterPublisher on first
-  /// use (not in the constructor: worldName isn't known yet there, and
-  /// these topics are fixed/global rather than per-world, but deferring
-  /// keeps every other transport setup in this class the same "lazy,
-  /// first-use" shape). See SfmCrowdSystem's own register_topic/
-  /// unregister_topic SDF defaults, which these must match.
-  private: void EnsureSfmPublishers();
 
   /// \brief Builds and publishes the register_human payload sending the
   /// pending route to human _index -- see SfmCrowdSystem::ParseRegistration()
@@ -712,13 +706,6 @@ class HumanControlPanel : public gz::gui::Plugin
   /// ActorCommandPlugin's ordinary (non-avoiding) path-follow drives it.
   private: void SendSimplePath(int _index);
 
-  /// \brief Whether anything is subscribed to the SFM register topic, i.e.
-  /// whether this world actually loaded an SfmCrowdSystem. Queried through
-  /// gz-transport's own discovery (Node::TopicInfo()'s subscriber list)
-  /// rather than assumed: most worlds don't load that system, and in those
-  /// an SFM registration is published into the void, which is exactly why a
-  /// confirmed route used to leave everyone standing still.
-  private: bool SfmSystemAvailable();
 
   /// \brief Whether NavGridSystem's planning service is being offered by this
   /// world, cached into avoidObstaclesAvailableState.
@@ -750,8 +737,9 @@ class HumanControlPanel : public gz::gui::Plugin
   private: void ApplySpawnMarkers();
 
 
-  private: gz::transport::Node::Publisher sfmRegisterPublisher;
-  private: gz::transport::Node::Publisher sfmUnregisterPublisher;
+  /// \brief SfmCrowdSystem への登録・解除。人物を知らないクラスで、
+  /// 電文の書式もこの中に閉じている。
+  private: SfmBridge sfm;
   /// \brief Global route-recording toggle -- see the routeRecording
   /// Q_PROPERTY's comment.
   private: bool routeRecordingState{false};
@@ -764,9 +752,6 @@ class HumanControlPanel : public gz::gui::Plugin
   private: bool useSfmState{false};
   private: bool cyclicRouteState{true};
 
-  /// \brief Cached result of SfmSystemAvailable(), refreshed on demand
-  /// rather than every frame (gz-transport discovery is a network query).
-  private: bool sfmAvailableState{false};
   private: bool avoidObstaclesState{true};
   /// \brief 障害物回避の経路計画。人物を知らないクラスで、
   /// 「プランナが居るか」の判定結果もこの中に控えられている。

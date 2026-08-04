@@ -617,10 +617,7 @@ void HumanControlPanel::removeHuman(int _index)
   // (it simply won't match any tracked name there) -- always sent anyway
   // so a removed-then-recreated same-named human never inherits a stale
   // route left over from before.
-  this->EnsureSfmPublishers();
-  gz::msgs::StringMsg unregisterMessage;
-  unregisterMessage.set_data(human.name);
-  this->sfmUnregisterPublisher.Publish(unregisterMessage);
+  this->sfm.Unregister(this->node, human.name);
 
   // Keep the keyboard target pointing at the same logical human across the
   // index shift caused by erase(), or clear it if that's the one removed.

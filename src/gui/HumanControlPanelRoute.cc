@@ -41,6 +41,7 @@
 
 
 #include "HumanControlPanelInternal.hh"
+#include "SfmBridge.hh"
 
 // Route editing, path templates, SFM registration and the obstacle-aware
 // path planner hookup.
@@ -70,7 +71,7 @@ bool HumanControlPanel::CyclicRoute() const
 
 bool HumanControlPanel::SfmAvailable() const
 {
-  return this->sfmAvailableState;
+  return this->sfm.CachedAvailable();
 }
 
 bool HumanControlPanel::AvoidObstacles() const
@@ -258,7 +259,7 @@ void HumanControlPanel::setUseSfm(bool _value)
   // Re-check availability at the moment someone actually asks for SFM, so
   // the warning in the QML reflects this world rather than a stale probe.
   if (_value)
-    this->SfmSystemAvailable();
+    this->sfm.Available(this->node);
   this->routeSettingsChanged();
 }
 
@@ -296,49 +297,15 @@ void HumanControlPanel::setSfmEnabledForTargets(bool _value)
       .arg(targets.size()).arg(_value ? "有効" : "無効"));
 }
 
-void HumanControlPanel::EnsureSfmPublishers()
-{
-  // Topic strings must match SfmCrowdSystem's own register_topic/
-  // unregister_topic SDF defaults (src/sfm_crowd_system.cpp) -- both sides
-  // hardcode the same default rather than this panel discovering it from
-  // the world's SDF, since there is normally exactly one SfmCrowdSystem
-  // per world and this keeps the wiring a single obvious string to grep
-  // for on either side.
-  if (!this->sfmRegisterPublisher.Valid())
-  {
-    this->sfmRegisterPublisher =
-        this->node.Advertise<gz::msgs::StringMsg>("/gz_human_sim/sfm/register_human");
-  }
-  if (!this->sfmUnregisterPublisher.Valid())
-  {
-    this->sfmUnregisterPublisher =
-        this->node.Advertise<gz::msgs::StringMsg>("/gz_human_sim/sfm/unregister_human");
-  }
-}
-
 void HumanControlPanel::SendSfmRegistration(int _index)
 {
   auto &human = this->humans.at(_index);
-  this->EnsureSfmPublishers();
 
-  // Wire format: name|cyclicGoals(0|1)|desiredVelocity|radius|x1,y1;x2,y2;...
-  // -1|-1 for desiredVelocity/radius means "use SfmCrowdSystem's own
-  // default" -- see SfmCrowdSystem::ParseRegistration()/RegistrationRequest,
-  // which this must match exactly.
-  std::ostringstream payload;
-  payload << human.name << '|' << (this->cyclicRouteState ? '1' : '0') << "|-1|-1|";
   // lastSentRoute, not pendingRoute: when obstacle avoidance is on this is
   // the planned route that goes around things, and when it's off the two are
   // identical (confirmRoute() sets it either way).
-  for (std::size_t i = 0; i < this->lastSentRoute.size(); ++i)
-  {
-    if (i > 0)
-      payload << ';';
-    payload << this->lastSentRoute[i].first << ',' << this->lastSentRoute[i].second;
-  }
-  gz::msgs::StringMsg message;
-  message.set_data(payload.str());
-  this->sfmRegisterPublisher.Publish(message);
+  this->sfm.Register(this->node, human.name, this->cyclicRouteState,
+      this->lastSentRoute);
 
   // A registered route only actually moves the human once sfm_enable is
   // also true. Force it back on rather than merely republishing whatever it
@@ -417,7 +384,7 @@ void HumanControlPanel::confirmRoute()
     return;
   }
 
-  if (this->useSfmState && !this->SfmSystemAvailable())
+  if (this->useSfmState && !this->sfm.Available(this->node))
   {
     // Publishing an SFM registration into a world with no SfmCrowdSystem is
     // a silent no-op -- refuse instead of letting the operator watch nobody
@@ -509,19 +476,5 @@ void HumanControlPanel::confirmRoute()
   if (skipped > 0)
     status += QString("／%1人は経路非対応のため除外").arg(skipped);
   this->SetStatus(status);
-}
-
-bool HumanControlPanel::SfmSystemAvailable()
-{
-  // SfmCrowdSystem subscribes to the register topic when it loads; nothing
-  // else does. gz-transport's own discovery can therefore answer "is that
-  // system in this world?" without either side having to advertise a
-  // dedicated heartbeat.
-  std::vector<gz::transport::MessagePublisher> publishers;
-  std::vector<gz::transport::MessagePublisher> subscribers;
-  const bool queried = this->node.TopicInfo(
-      "/gz_human_sim/sfm/register_human", publishers, subscribers);
-  this->sfmAvailableState = queried && !subscribers.empty();
-  return this->sfmAvailableState;
 }
 }  // namespace gz_human_sim
