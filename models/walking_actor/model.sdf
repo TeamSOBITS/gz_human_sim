@@ -11,6 +11,8 @@
       <follow_mode_topic>/set_follow_mode</follow_mode_topic>
       <jump_topic>/cmd_jump</jump_topic>
       <pose_topic>/cmd_pose</pose_topic>
+      <!-- 状態フィードバック（構想書 §3）。サーバーが publish する側。 -->
+      <state_topic>/state</state_topic>
       <!-- Playback rate for the named-pose clips (sit_down/sitting/stand_up
            and any future ones). The source mocap is 6.6 s per transition,
            which reads as slow motion; 2.5x puts a full sit at ~2.6 s. -->

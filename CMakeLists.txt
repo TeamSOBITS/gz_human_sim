@@ -38,6 +38,9 @@ target_link_libraries(gz_human_actor_animation_control
 add_library(gz_human_actor_command SHARED
   src/server/actor_command_plugin.cpp
 )
+# include/gz_human_sim/: サーバー側と GUI 側が共有する型だけを置く場所
+# （CharacterState.hh など）。Gazebo にも Qt にも依存しない。
+target_include_directories(gz_human_actor_command PRIVATE include)
 target_link_libraries(gz_human_actor_command
   gz-plugin2::gz-plugin2
   gz-sim8::gz-sim8
@@ -92,6 +95,7 @@ add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanelOverlay.cc
   src/gui/HumanControlPanelRoute.cc
   src/gui/HumanControlPanelSpawn.cc
+  src/gui/HumanControlPanelState.cc
   src/gui/HumanControlPanelTeleop.cc
   src/gui/HumanControlPanel.hh
   src/gui/HumanControlPanelInternal.hh
@@ -104,6 +108,7 @@ set_target_properties(HumanControlPanel PROPERTIES
   AUTOMOC ON
   AUTORCC ON
 )
+target_include_directories(HumanControlPanel PRIVATE include)
 target_link_libraries(HumanControlPanel
   gz-gui8::gz-gui8
   gz-rendering8::gz-rendering8
@@ -131,6 +136,11 @@ install(TARGETS
 install(TARGETS
   HumanControlPanel
   DESTINATION lib/${PROJECT_NAME}/gz-gui
+)
+
+install(DIRECTORY
+  include/
+  DESTINATION include
 )
 
 install(DIRECTORY

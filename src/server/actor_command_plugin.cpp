@@ -13,6 +13,7 @@
 #include <gz/math/Vector2.hh>
 #include <gz/msgs/double.pb.h>
 #include <gz/msgs/empty.pb.h>
+#include <gz/msgs/param.pb.h>
 #include <gz/msgs/pose_v.pb.h>
 #include <gz/msgs/stringmsg.pb.h>
 #include <gz/msgs/twist.pb.h>
@@ -24,6 +25,9 @@
 #include <gz/sim/components/PoseCmd.hh>
 #include <gz/transport/Node.hh>
 #include <sdf/Element.hh>
+
+// 状態 enum とトピック/キーの定義。GUI 側と同じものを使う（構想書 §3）。
+#include "gz_human_sim/CharacterState.hh"
 
 namespace gz_human_sim
 {
@@ -97,6 +101,15 @@ class ActorCommandPlugin
     this->followModeTopic =
         _sdf->Get<std::string>("follow_mode_topic", "/set_follow_mode").first;
     this->poseTopic = _sdf->Get<std::string>("pose_topic", "/cmd_pose").first;
+    // 状態のフィードバック（構想書 §3）。他のトピックと同じく SDF で
+    // 差し替えでき、spawn_human.launch.py が namespace を前置する。
+    this->stateTopic =
+        _sdf->Get<std::string>("state_topic", kDefaultStateTopic).first;
+    if (!this->stateTopic.empty())
+    {
+      this->statePublisher =
+          this->transportNode.Advertise<gz::msgs::Param>(this->stateTopic);
+    }
     // How much faster than real time the enter/hold/exit clips in kPoseClips
     // are played. The sit_down/stand_up clips are 6.6 s of mocap each, which
     // reads as slow-motion next to the walk cycle; ~2.5x puts a full sit at
@@ -475,6 +488,88 @@ class ActorCommandPlugin
             gz::sim::ComponentState::OneTimeChange);
       }
     }
+
+    this->PublishState(_info, distanceTravelled, dt);
+  }
+
+  /// \brief いまの状態を state_topic へ流す（構想書 §3）。
+  ///
+  /// この状態は元々すべてこのクラスの中にあり、外へ出していませんでした。
+  /// GUI は「自分が送った指令」から状態を推測していましたが、テレオペが
+  /// 別パッケージへ移ると（構想書 §11）その推測は成り立ちません。
+  /// 真実はここ（サーバー側）にあるので、ここから publish します。
+  ///
+  /// 送るのは「変化したとき」＋ kStateHeartbeat ごと。毎ティック送ると
+  /// 1 kHz 級の無駄なトラフィックになり、変化時だけだと後から購読を始めた
+  /// 相手がいつまでも何も受け取れません。roster が同じ理由で 2 秒ごとに
+  /// 再送しているのと同じ考え方です。
+  private: void PublishState(const gz::sim::UpdateInfo &_info,
+      double _distanceTravelled, double _dt)
+  {
+    if (!this->statePublisher.Valid())
+      return;
+
+    const CharacterState state = this->CurrentState();
+    // 速度は「このティックで実際に進んだ距離 / dt」。指令値ではなく実測に
+    // するのは、壁に阻まれて止まっているときに 0 と出したいためです。
+    const double speed = (_dt > 0.0) ? (_distanceTravelled / _dt) : 0.0;
+    std::string pose;
+    if (this->poseState != PoseState::None && this->activePoseIndex >= 0 &&
+        this->activePoseIndex < kPoseClipCount)
+    {
+      pose = kPoseClips[this->activePoseIndex].name;
+    }
+
+    const bool changed = state != this->publishedState ||
+        pose != this->publishedPose;
+    const auto since = _info.simTime - this->lastStatePublish;
+    if (!changed && since < kStateHeartbeat)
+      return;
+
+    this->publishedState = state;
+    this->publishedPose = pose;
+    this->lastStatePublish = _info.simTime;
+
+    // gz.msgs.Param は string -> Any の map なので、後からキーを足しても
+    // 既存の読み手が壊れません。着席機能では seat_id が増える予定です。
+    gz::msgs::Param message;
+    auto &params = *message.mutable_params();
+    params[kStateKeyState].set_type(gz::msgs::Any::STRING);
+    params[kStateKeyState].set_string_value(ToString(state));
+    params[kStateKeyPose].set_type(gz::msgs::Any::STRING);
+    params[kStateKeyPose].set_string_value(pose);
+    params[kStateKeySpeed].set_type(gz::msgs::Any::DOUBLE);
+    params[kStateKeySpeed].set_double_value(speed);
+    this->statePublisher.Publish(message);
+  }
+
+  /// \brief いま成立している状態をひとつ選ぶ。
+  ///
+  /// 判定の順序が優先順位です。同時に成り立ちうる（ポーズ移行中に速度指令が
+  /// 残っている等）ので、上にあるものが勝ちます。
+  private: CharacterState CurrentState() const
+  {
+    if (this->removalRequested)
+      return CharacterState::Removing;
+    // ポーズはジャンプ・移動より先。座り込み中に脚が動いて見えるのは
+    // アニメーションの都合であって、状態としては「座ろうとしている」です。
+    switch (this->poseState)
+    {
+      case PoseState::Entering: return CharacterState::PoseEntering;
+      case PoseState::Holding:  return CharacterState::PoseHolding;
+      case PoseState::Exiting:  return CharacterState::PoseExiting;
+      case PoseState::None:     break;
+    }
+    if (this->jumpCount > 0)
+      return CharacterState::Jumping;
+    if (!this->path.empty() && this->pathIndex < this->path.size())
+      return CharacterState::Following;
+    if (this->velocity.linear != 0.0 || this->velocity.lateral != 0.0 ||
+        this->velocity.angular != 0.0 || this->velocity.turnToFace)
+    {
+      return CharacterState::Moving;
+    }
+    return CharacterState::Standing;
   }
 
   /// \brief One-shot, on the first PreUpdate() tick: moves the actor's
@@ -1234,6 +1329,18 @@ class ActorCommandPlugin
   private: std::string removeTopic;
   private: std::string followModeTopic;
   private: std::string poseTopic;
+  // 状態フィードバック（PublishState()）。publishedState/publishedPose は
+  // 「最後に送った内容」で、変化検出だけに使う。lastStatePublish は
+  // 定期再送のためのシミュレーション時刻。
+  private: std::string stateTopic;
+  private: gz::transport::Node::Publisher statePublisher;
+  private: CharacterState publishedState{CharacterState::Unknown};
+  private: std::string publishedPose;
+  private: std::chrono::steady_clock::duration lastStatePublish{
+      std::chrono::steady_clock::duration::zero()};
+  // 変化が無くても、この間隔で再送する。後から購読を始めた相手が
+  // いつまでも何も受け取れないのを防ぐため（roster の 2 秒再送と同じ理由）。
+  private: static constexpr std::chrono::milliseconds kStateHeartbeat{500};
   private: bool removalRequested{false};
   private: std::string animationName;
   private: std::string followMode{"auto"};

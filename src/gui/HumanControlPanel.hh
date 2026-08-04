@@ -27,7 +27,11 @@ struct _SDL_GameController;
 #include <gz/math/Vector3.hh>
 #include <gz/msgs/pose_v.pb.h>
 #include <gz/rendering/RenderTypes.hh>
+#include <gz/msgs/param.pb.h>
 #include <gz/transport/Node.hh>
+
+// サーバー側と共有する状態の定義（構想書 §3）。
+#include "gz_human_sim/CharacterState.hh"
 
 namespace gz_human_sim
 {
@@ -192,6 +196,11 @@ class HumanControlPanel : public gz::gui::Plugin
   /// (e.g. "DualSense Wireless Controller 接続中" / "コントローラが見つかりません").
   Q_PROPERTY(QString dualsenseStatusText READ DualsenseStatusText NOTIFY dualsenseStatusChanged)
 
+  /// \brief 選択中の人物の状態（サーバーが publish した値の表示用）。
+  ///        このパネルが推測した値ではありません -- 構想書 §3。
+  Q_PROPERTY(QString activeCharacterState READ ActiveCharacterState
+      NOTIFY characterStateChanged)
+
   /// \brief Right-stick vertical direction for the orbit camera. Off (the
   /// default) is the third-person convention every console game ships
   /// with: push the stick up and the camera swings down so you look up.
@@ -241,6 +250,12 @@ class HumanControlPanel : public gz::gui::Plugin
   public: bool DualsenseModeEnabled() const;
   public: void SetDualsenseModeEnabled(bool _enabled);
   public: QString DualsenseStatusText() const;
+
+  /// \brief 選択中の人物の状態を日本語ラベルで返す。未受信なら "—"。
+  public: QString ActiveCharacterState() const;
+
+  /// \brief _index の人物の状態ラベル。人物一覧の行に出す用。
+  public: Q_INVOKABLE QString characterStateAt(int _index) const;
   public: bool InvertCameraY() const;
   public: void SetInvertCameraY(bool _enabled);
 
@@ -667,6 +682,25 @@ class HumanControlPanel : public gz::gui::Plugin
     bool showSpawnMarker{true};
     int appliedShowSpawnMarker{-1};
     gz::rendering::VisualPtr markerVisual;
+
+    // サーバー（ActorCommandPlugin）が state_topic へ流してくる状態。
+    // 構想書 §3 のとおり、真実はサーバー側にあり、ここはその写しです。
+    // このパネルが「自分が送った指令」から推測した値ではありません。
+    //
+    // 購読は transport スレッドで走るので、読み書きは stateMutex の下で
+    // 行うこと（poses/poseMutex と同じ扱い）。
+    CharacterState characterState{CharacterState::Unknown};
+    /// \brief 保持中の名前付きポーズ。無ければ空。サーバーが決めた値。
+    std::string serverPose;
+    /// \brief 実測の並進速度 [m/s]。指令値ではありません。
+    double serverSpeed{0.0};
+    /// \brief 一度でも状態を受け取ったか。未受信と「Unknown を受信」を
+    ///        区別するため（古いサーバーと繋がっている場合に効きます）。
+    bool stateReceived{false};
+    /// \brief この人物の state トピック名。削除時に Unsubscribe するために
+    ///        持っておく（gz-transport の Subscribe はハンドルを返さず、
+    ///        トピック名で解除する）。
+    std::string stateTopic;
   };
 
   /// \brief Pending camera command, written on the Qt thread by
@@ -949,6 +983,18 @@ class HumanControlPanel : public gz::gui::Plugin
   private: gz::transport::Node::Publisher rosterPublisher;
 
   private: void PublishRoster();
+
+  /// \brief state_topic のハンドラ。transport スレッドで走る。
+  ///        _name はどの人物のものかを閉じ込めた値（トピックは人物ごと）。
+  private: void OnCharacterState(const gz::msgs::Param &_message,
+      const std::string &_name);
+
+  /// \brief _index の人物の state トピックを購読する。spawn の確定時に呼ぶ。
+  private: void SubscribeCharacterState(int _index);
+
+  /// \brief 人物ごとの状態を守る。OnCharacterState() が transport スレッドで
+  ///        書き、Qt スレッドが読む（poseMutex と同じ扱い）。
+  private: mutable std::mutex stateMutex;
 
   private: QTimer *rosterTimer{nullptr};
   private: std::vector<Human> humans;
@@ -1255,6 +1301,7 @@ class HumanControlPanel : public gz::gui::Plugin
   signals: void speedMultiplierChanged();
   signals: void dualsenseModeChanged();
   signals: void dualsenseStatusChanged();
+  signals: void characterStateChanged();
   signals: void invertCameraYChanged();
 };
 }  // namespace gz_human_sim

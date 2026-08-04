@@ -70,6 +70,30 @@ Rectangle {
       }
     }
 
+    // 選択中の人物がいま何をしているか。
+    //
+    // これはパネルが指令から推測した値ではなく、サーバー
+    // （ActorCommandPlugin）が state トピックへ流してくる値です
+    // （構想書 §3）。テレオペ以外の理由で人物が動いたとき -- 経路追従、
+    // 将来の NPC や着席 -- も、ここには正しい状態が出ます。
+    Rectangle {
+      Layout.fillWidth: true
+      height: 28
+      radius: 6
+      color: "#eef2f1"
+      visible: HumanControlPanel.activeHumanIndex >= 0
+      Label {
+        anchors.fill: parent
+        anchors.leftMargin: 10
+        anchors.rightMargin: 10
+        text: "状態: " + HumanControlPanel.activeCharacterState
+        color: "#3d5450"
+        elide: Text.ElideRight
+        verticalAlignment: Text.AlignVCenter
+        horizontalAlignment: Text.AlignHCenter
+      }
+    }
+
     // ── 人物をspawn ────────────────────────────────────────
     // 1人でも複数人でも、座標指定でもクリック指定でも、ここ1か所で完結する
     // （以前は「人物をspawn」と「まとめてspawn」で別フォーム・別ボタンだった）。

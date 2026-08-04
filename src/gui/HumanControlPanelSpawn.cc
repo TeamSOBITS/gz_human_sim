@@ -694,6 +694,9 @@ void HumanControlPanel::PollSpawnConfirmation(
   }
   this->humans.push_back(std::move(human));
   const int newIndex = static_cast<int>(this->humans.size()) - 1;
+  // サーバーが publish する状態を購読する（構想書 §3）。この人物が
+  // いま何をしているかは、このパネルではなくサーバーが決めます。
+  this->SubscribeCharacterState(newIndex);
   this->humansChanged();
   this->SetStatus(_name + " (" + _model + ") を (" +
       QString::number(_x) + ", " + QString::number(_y) + ", " +
@@ -726,6 +729,10 @@ void HumanControlPanel::removeHuman(int _index)
   }
 
   Human human = std::move(this->humans.at(_index));
+  // 状態の購読を解除してから消す。残しておくと、同じ名前で再 spawn した
+  // ときに古いハンドラが二重に走ります。
+  if (!human.stateTopic.empty())
+    this->node.Unsubscribe(human.stateTopic);
   this->humans.erase(this->humans.begin() + _index);
   this->humansChanged();
 
