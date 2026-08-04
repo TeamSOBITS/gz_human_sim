@@ -28,7 +28,7 @@ find_package(Boost REQUIRED)
 find_package(SDL2 REQUIRED)
 
 add_library(gz_human_actor_animation_control SHARED
-  src/actor_animation_control_plugin.cpp
+  src/server/actor_animation_control_plugin.cpp
 )
 target_link_libraries(gz_human_actor_animation_control
   gz-plugin2::gz-plugin2
@@ -36,7 +36,7 @@ target_link_libraries(gz_human_actor_animation_control
 )
 
 add_library(gz_human_actor_command SHARED
-  src/actor_command_plugin.cpp
+  src/server/actor_command_plugin.cpp
 )
 target_link_libraries(gz_human_actor_command
   gz-plugin2::gz-plugin2
@@ -50,7 +50,7 @@ target_link_libraries(gz_human_actor_command
 # separate colcon package, so this builds standalone if the sibling
 # lightsfm/sfm_for_gazebo clones this was developed alongside are removed.
 add_library(gz_human_sfm_crowd_system SHARED
-  src/sfm_crowd_system.cpp
+  src/server/sfm_crowd_system.cpp
 )
 target_include_directories(gz_human_sfm_crowd_system PRIVATE
   third_party/lightsfm/include
@@ -67,7 +67,7 @@ target_link_libraries(gz_human_sfm_crowd_system
 # mirroring the Nav2 layering sobits_navigation_stack uses for the robots --
 # see the file header for the layer-by-layer correspondence.
 add_library(gz_human_nav_grid_system SHARED
-  src/nav_grid_system.cpp
+  src/server/nav_grid_system.cpp
 )
 target_link_libraries(gz_human_nav_grid_system
   gz-plugin2::gz-plugin2
@@ -80,8 +80,8 @@ target_link_libraries(gz_human_nav_grid_system
 # Gazebo sidebar. Kept in its own lib/gz-gui search path, separate from
 # the gz-sim System plugins above (see GZ_GUI_PLUGIN_PATH env-hook below).
 add_library(HumanControlPanel SHARED
-  src/HumanControlPanel.cc
-  src/HumanControlPanel.hh
+  src/gui/HumanControlPanel.cc
+  src/gui/HumanControlPanel.hh
   gui/HumanControlPanel.qrc
 )
 target_compile_features(HumanControlPanel PUBLIC cxx_std_17)
