@@ -359,7 +359,7 @@ void HumanControlPanel::ProbeSafeSpawnPosition(
     int _modelIndex, QString _name, QString _posePreset, QString _followMode,
     double _x, double _y, double _z, double _yaw, int _attempt)
 {
-  if (_attempt >= kSpawnSafetyMaxAttempts || this->collisionBodyTemplate.empty())
+  if (_attempt >= kSpawnSafetyMaxAttempts || !this->collisionBody.HasTemplate())
   {
     // Gave up finding a clear spot (or never had a template to probe
     // with) -- spawn at the originally-requested position anyway rather
@@ -385,26 +385,9 @@ void HumanControlPanel::ProbeSafeSpawnPosition(
   const std::string probeName = "__spawn_probe_" + _name.toStdString() +
       "_" + std::to_string(_attempt);
   const std::string probeTopic = "/model/" + probeName + "/cmd_vel";
-  std::string probeSdf = this->collisionBodyTemplate;
-  const std::string namePlaceholder = "<model name=\"human_collision_body\">";
-  const auto namePos = probeSdf.find(namePlaceholder);
-  if (namePos != std::string::npos)
-  {
-    probeSdf.replace(namePos, namePlaceholder.size(),
-        "<model name=\"" + probeName + "\">");
-  }
-  // Give this probe its OWN VelocityControl topic -- reusing the
-  // template's unmodified placeholder topic would make every simultaneous
-  // probe (and any real, already-spawned collision body still using the
-  // template's literal default) fight over the same one.
-  const std::string topicPlaceholder =
-      "<topic>/model/human_collision_body/cmd_vel</topic>";
-  const auto topicPos = probeSdf.find(topicPlaceholder);
-  if (topicPos != std::string::npos)
-  {
-    probeSdf.replace(topicPos, topicPlaceholder.size(),
-        "<topic>" + probeTopic + "</topic>");
-  }
+  // 寸法はテンプレートの既定値のまま。プローブは「人物と同じ太さのものが
+  // そこに入るか」を見るためのものなので、変えてはいけない。
+  const std::string probeSdf = this->collisionBody.BuildSdf(probeName);
 
   // Confirmed by direct testing (see the commit this landed in): a probe
   // simply DROPPED at an already-overlapping candidate does NOT get

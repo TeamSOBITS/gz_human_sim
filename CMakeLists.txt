@@ -82,6 +82,7 @@ target_link_libraries(gz_human_nav_grid_system
 # ~3700-line file this used to be.
 add_library(HumanControlPanel SHARED
   src/gui/CameraController.cc
+  src/gui/CollisionBodyController.cc
   src/gui/HumanControlPanel.cc
   src/gui/HumanControlPanelCamera.cc
   src/gui/HumanControlPanelCollision.cc
@@ -92,6 +93,7 @@ add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanelState.cc
   src/gui/SpawnMarkerRenderer.cc
   src/gui/CameraController.hh
+  src/gui/CollisionBodyController.hh
   src/gui/HumanControlPanel.hh
   src/gui/HumanRegistry.hh
   src/gui/HumanControlPanelInternal.hh

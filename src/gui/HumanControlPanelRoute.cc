@@ -80,7 +80,7 @@ bool HumanControlPanel::AvoidObstacles() const
 
 bool HumanControlPanel::AvoidObstaclesAvailable() const
 {
-  return this->avoidObstaclesAvailableState;
+  return this->pathPlanner.CachedAvailable();
 }
 
 void HumanControlPanel::setAvoidObstacles(bool _value)
@@ -95,53 +95,15 @@ void HumanControlPanel::setAvoidObstacles(bool _value)
 
 bool HumanControlPanel::NavPlannerAvailable()
 {
-  // A service, unlike SFM's topic, so this asks the service list rather than
-  // the subscriber list -- same idea either way: the feature lives in a world
-  // plugin, and a world that didn't load it simply won't be offering this.
-  std::vector<std::string> services;
-  this->node.ServiceList(services);
-  this->avoidObstaclesAvailableState =
-      std::find(services.begin(), services.end(), kNavPlanService) != services.end();
-  return this->avoidObstaclesAvailableState;
+  // 判定そのものは PathPlanner が持つ。ここは QML 向けの窓口。
+  return this->pathPlanner.Available(this->node);
 }
 
 bool HumanControlPanel::PlanAroundObstacles(
     const std::vector<std::pair<double, double>> &_route, double _bodyRadius,
     std::vector<std::pair<double, double>> &_planned)
 {
-  _planned = _route;
-  if (_route.size() < 2)
-    return false;
-  if (!this->NavPlannerAvailable())
-    return false;
-
-  // Wire format must match NavGridSystem::OnPlanPath():
-  // "inflationRadius|x1,y1;x2,y2;..."
-  std::ostringstream payload;
-  payload << _bodyRadius << '|';
-  for (std::size_t i = 0; i < _route.size(); ++i)
-  {
-    if (i > 0)
-      payload << ';';
-    payload << _route[i].first << ',' << _route[i].second;
-  }
-
-  gz::msgs::StringMsg request;
-  request.set_data(payload.str());
-  gz::msgs::Pose_V response;
-  bool result = false;
-  const bool executed = this->node.Request(
-      kNavPlanService, request, kNavPlanTimeoutMs, response, result);
-  if (!executed || !result || response.pose_size() < 2)
-    return false;
-
-  _planned.clear();
-  for (int i = 0; i < response.pose_size(); ++i)
-  {
-    _planned.emplace_back(
-        response.pose(i).position().x(), response.pose(i).position().y());
-  }
-  return true;
+  return this->pathPlanner.Plan(this->node, _route, _bodyRadius, _planned);
 }
 
 void HumanControlPanel::sendWaypoint(int _index, double _x, double _y)
@@ -167,51 +129,12 @@ void HumanControlPanel::generatePathTemplate(
   if (_templateIndex < 0 || _templateIndex >= kPathTemplateCount)
     return;
 
-  // (x, y, yaw) tuples, same math as scripts/path_template.py's
-  // _circle_waypoints()/_square_waypoints() -- kept in sync by hand since
-  // one is Python (for headless/CLI use) and this is C++ (for the GUI
-  // button), not sharable code between the two.
-  std::vector<std::array<double, 3>> waypoints;
-  const double direction = _clockwise ? -1.0 : 1.0;
-
-  if (_templateIndex == kPathTemplateCircle)
-  {
-    const double radius = std::max(0.1, _size);
-    const int count = std::clamp(_numWaypoints, 3, 200);
-    for (int i = 0; i < count; ++i)
-    {
-      const double angle = direction * i * (2.0 * M_PI / count);
-      const double tangent = angle + direction * (M_PI / 2.0);
-      waypoints.push_back({_centerX + radius * std::cos(angle),
-          _centerY + radius * std::sin(angle), tangent});
-    }
-  }
-  else
-  {
-    const double half = std::max(0.1, _size) / 2.0;
-    std::vector<std::pair<double, double>> corners = {
-      {_centerX + half, _centerY + half}, {_centerX - half, _centerY + half},
-      {_centerX - half, _centerY - half}, {_centerX + half, _centerY - half}};
-    if (_clockwise)
-      std::reverse(corners.begin() + 1, corners.end());
-    for (std::size_t i = 0; i < corners.size(); ++i)
-    {
-      const auto &[x, y] = corners[i];
-      const auto &[nextX, nextY] = corners[(i + 1) % corners.size()];
-      waypoints.push_back({x, y, std::atan2(nextY - y, nextX - x)});
-    }
-  }
-
   // Replaces the pending route rather than publishing straight to one
   // human: from here on a template-made route and a clicked one are the
   // same thing, edited with the same undo/clear buttons and applied to the
   // same target set by the same confirmRoute() button.
-  this->pendingRoute.clear();
-  for (const auto &[x, y, yaw] : waypoints)
-  {
-    (void)yaw;  // confirmRoute() re-derives headings from the point order.
-    this->pendingRoute.emplace_back(x, y);
-  }
+  this->pendingRoute = TemplateWaypoints(_templateIndex, _centerX, _centerY,
+      _size, _numWaypoints, _clockwise);
   this->pendingRouteChanged();
   this->SetStatus(QString(kPathTemplateLabels[_templateIndex]) + "の経路（" +
       QString::number(this->pendingRoute.size()) +

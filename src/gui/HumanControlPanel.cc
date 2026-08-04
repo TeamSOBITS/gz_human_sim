@@ -195,7 +195,7 @@ void HumanControlPanel::LoadConfig(const tinyxml2::XMLElement *)
   {
     std::ostringstream buffer;
     buffer << collisionBodyFile.rdbuf();
-    this->collisionBodyTemplate = buffer.str();
+    this->collisionBody.SetTemplate(buffer.str());
   }
 
   // A single application-wide filter covers everything eventFilter() needs:

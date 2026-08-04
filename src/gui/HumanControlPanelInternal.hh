@@ -60,18 +60,6 @@ inline const char *const kFollowModeValues[] = {"auto", "path"};
 inline constexpr int kFollowModeCount =
     static_cast<int>(sizeof(kFollowModeValues) / sizeof(kFollowModeValues[0]));
 
-// Path templates generatePathTemplate() can generate, index-matched with
-// PathTemplateLabels(); keep this in sync with scripts/path_template.py's
-// --shape choices (that script is the standalone-CLI version of the same
-// shapes; this one publishes straight to gz-transport for the GUI button
-// instead of going through ROS + a subprocess).
-enum PathTemplateIndex
-{
-  kPathTemplateCircle = 0,
-  kPathTemplateSquare,
-  kPathTemplateCount,
-};
-inline const char *const kPathTemplateLabels[kPathTemplateCount] = {"円", "四角"};
 
 // Spawn position auto-offset: fans consecutive default-position spawns out
 // in a grid instead of stacking them on top of each other at (0, 0).
@@ -122,20 +110,7 @@ inline constexpr int kEntityPollIntervalMs = 500;
 inline constexpr int kEntityPollMaxAttempts = 20;
 inline constexpr unsigned int kStateQueryTimeoutMs = 800u;
 
-// Same idea as kSpawnSafetyMaxAttempts's 8-attempt cap, but per-frame
-// instead of per-spawn-attempt: gives up searching the render scene for a
-// human's collision-body visual after this many failed Render-event
-// ticks (the companion model may take a few frames to actually appear
-// after being spawned/respawned).
-inline constexpr int kCollisionVisualMaxRetries = 600;
 
-// NavGridSystem's planning service (see src/nav_grid_system.cpp's
-// plan_service SDF default, which this must match) and how long to wait for
-// it. Planning is a one-shot A* over an already-built grid, so it answers in
-// milliseconds; the generous timeout is only for the first call after world
-// load, when the grid may still be being rasterised.
-inline const char *const kNavPlanService = "/gz_human_sim/nav/plan_path";
-inline constexpr unsigned int kNavPlanTimeoutMs = 3000u;
 
 // kHumanModelDefaultZ[] for a model NAME rather than an index -- used by
 // setViewpoint()'s first-person case, which only has Human::model (a

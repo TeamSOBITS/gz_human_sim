@@ -27,6 +27,9 @@
 // サーバー側と共有する状態の定義（構想書 §3）。
 #include "gz_human_sim/CharacterState.hh"
 #include "CameraController.hh"
+#include "CollisionBodyController.hh"
+#include "PathPlanner.hh"
+#include "PathTemplates.hh"
 #include "SpawnMarkerRenderer.hh"
 #include "HumanRegistry.hh"
 
@@ -610,24 +613,6 @@ class HumanControlPanel : public gz::gui::Plugin
   /// Visual entity is first created, not watched for changes afterward.
   private: void ApplyCollisionVisibility();
 
-  /// \brief Shows/hides the named collision-body model in the render
-  /// scene, returning false if the scene has no visual for it (yet).
-  ///
-  /// Toggles Visual::SetVisible() rather than dimming a cloned material's
-  /// transparency, which is what this used to do and what never actually
-  /// worked: it required the model's capsule Visual to carry a non-null
-  /// Material() of its own, and gz-sim's SceneManager hangs the material
-  /// off the Geometry instead, so the search always came up empty and the
-  /// button silently did nothing. Visibility needs no material at all, and
-  /// "hidden" means genuinely gone rather than very faint.
-  ///
-  /// Applies to every visual belonging to the model -- its own top-level
-  /// node plus each descendant -- instead of betting on one particular
-  /// level of gz-sim's "<model>::<link>::<visual>" scoped naming being the
-  /// one that matters. Setting it on all of them is idempotent, and means
-  /// this keeps working whichever level the geometry actually hangs from.
-  private: bool SetCollisionBodyVisible(const gz::rendering::ScenePtr &_scene,
-      const std::string &_modelName, bool _visible) const;
 
   /// \brief Handler for /world/<w>/dynamic_pose/info -- caches every
   /// entity's live (x, y, z, yaw) in poses, keyed by name. Runs on a
@@ -718,13 +703,14 @@ class HumanControlPanel : public gz::gui::Plugin
   /// distance, so its last visible position is the candidate itself.
   private: std::map<std::string, ActiveProbe> activeProbes;
 
-  /// \brief Raw text of models/human_collision_body/model.sdf, read once
-  /// in LoadConfig() and reused by every ProbeSafeSpawnPosition() call
-  /// (each spawn attempt just substitutes a fresh throwaway model name).
-  /// Empty if the file couldn't be found, in which case the safety probe
-  /// is skipped entirely and spawning proceeds unchecked, same as before
-  /// this feature existed.
-  private: std::string collisionBodyTemplate;
+  /// \brief 当たり判定モデルの SDF 組み立てとデバッグ表示。人物のことは
+  /// 知らないクラスなので、誰に当たり判定モデルが付いているかの判断は
+  /// HumanControlPanelCollision.cc が行う。
+  ///
+  /// テンプレート（models/human_collision_body/model.sdf）は LoadConfig()
+  /// で一度だけ読み込む。読めなければスポーン安全判定は丸ごと省略され、
+  /// この機能が無かった頃と同じ挙動に戻る。
+  private: CollisionBodyController collisionBody;
 
   /// \brief 床のスポーンマーカーの描画。人物のことは知らないクラスなので、
   /// 誰にどのマーカーが要るかは HumanControlPanelOverlay.cc が決める。
@@ -805,7 +791,9 @@ class HumanControlPanel : public gz::gui::Plugin
   /// rather than every frame (gz-transport discovery is a network query).
   private: bool sfmAvailableState{false};
   private: bool avoidObstaclesState{true};
-  private: bool avoidObstaclesAvailableState{false};
+  /// \brief 障害物回避の経路計画。人物を知らないクラスで、
+  /// 「プランナが居るか」の判定結果もこの中に控えられている。
+  private: PathPlanner pathPlanner;
   /// \brief The route actually sent by the last confirmRoute() -- the planned
   /// one when obstacle avoidance is on, so the QML can show how many points
   /// the planner produced from the handful that were clicked.
