@@ -53,7 +53,7 @@ void HumanControlPanel::setShowSpawnMarker(int _index, bool _value)
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return;
-  this->humans.at(_index).showSpawnMarker = _value;
+  this->humans.at(_index).marker.show = _value;
   // ApplySpawnMarkers() (render thread) picks this up next frame, same
   // deferred-to-the-render-thread arrangement setShowCollision() uses.
   this->humansChanged();
@@ -62,7 +62,7 @@ void HumanControlPanel::setShowSpawnMarker(int _index, bool _value)
 void HumanControlPanel::setShowSpawnMarkerAll(bool _value)
 {
   for (auto &human : this->humans)
-    human.showSpawnMarker = _value;
+    human.marker.show = _value;
   this->humansChanged();
 }
 
@@ -70,14 +70,14 @@ bool HumanControlPanel::showSpawnMarkerAt(int _index) const
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return false;
-  return this->humans.at(_index).showSpawnMarker;
+  return this->humans.at(_index).marker.show;
 }
 
 QString HumanControlPanel::spawnMarkerColorAt(int _index) const
 {
   int colorIndex = 0;
   if (_index >= 0 && _index < static_cast<int>(this->humans.size()))
-    colorIndex = this->humans.at(_index).markerColorIndex;
+    colorIndex = this->humans.at(_index).marker.colorIndex;
   const auto &color = kMarkerColors[colorIndex % kMarkerColorCount];
   return QString("#%1%2%3")
       .arg(static_cast<int>(color[0] * 255.0), 2, 16, QChar('0'))
@@ -181,24 +181,24 @@ void HumanControlPanel::ApplySpawnMarkers()
 
   for (auto &human : this->humans)
   {
-    if (!human.markerVisual)
+    if (!human.marker.visual)
     {
-      human.markerVisual = this->CreateMarkerVisual(
+      human.marker.visual = this->CreateMarkerVisual(
           scene, "__spawn_marker_" + human.name,
-          human.spawnX, human.spawnY, human.spawnZ,
-          human.markerColorIndex, false);
-      if (!human.markerVisual)
+          human.marker.x, human.marker.y, human.marker.z,
+          human.marker.colorIndex, false);
+      if (!human.marker.visual)
         continue;
       // A freshly created visual is visible; force the desired state to be
       // pushed below rather than assumed, same tri-state reasoning
       // appliedShowCollision uses.
-      human.appliedShowSpawnMarker = -1;
+      human.marker.applied = -1;
     }
-    const int desired = human.showSpawnMarker ? 1 : 0;
-    if (human.appliedShowSpawnMarker == desired)
+    const int desired = human.marker.show ? 1 : 0;
+    if (human.marker.applied == desired)
       continue;
-    human.markerVisual->SetVisible(human.showSpawnMarker);
-    human.appliedShowSpawnMarker = desired;
+    human.marker.visual->SetVisible(human.marker.show);
+    human.marker.applied = desired;
   }
 
   // Picked-but-not-yet-spawned points get their own neutral markers, so
@@ -237,8 +237,8 @@ void HumanControlPanel::ApplySpawnMarkers()
       * kMarkerSpinRate;
   for (auto &human : this->humans)
   {
-    if (human.markerVisual)
-      human.markerVisual->SetLocalRotation(0.0, 0.0, angle);
+    if (human.marker.visual)
+      human.marker.visual->SetLocalRotation(0.0, 0.0, angle);
   }
   for (auto &visual : this->pendingSpawnMarkerVisuals)
   {

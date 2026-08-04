@@ -26,6 +26,7 @@
 
 // サーバー側と共有する状態の定義（構想書 §3）。
 #include "gz_human_sim/CharacterState.hh"
+#include "HumanRegistry.hh"
 
 namespace gz_human_sim
 {
@@ -476,120 +477,6 @@ class HumanControlPanel : public gz::gui::Plugin
   /// the render thread (the only thread allowed to touch the Ogre2 scene).
   protected: bool eventFilter(QObject *_obj, QEvent *_event) override;
 
-  private: struct Human
-  {
-    std::string name;
-    std::string model;
-    QProcess *process{nullptr};
-    gz::transport::Node::Publisher velocityPublisher;
-    gz::transport::Node::Publisher pathPublisher;
-    // Actors can't be removed through /world/<w>/remove (gz-sim's
-    // UserCommands system only accepts MODEL/LIGHT there); this instead
-    // tells the actor's own ActorCommandPlugin to remove itself via the
-    // ECM directly. Only valid for actor-backed humans, same as the two
-    // publishers above.
-    gz::transport::Node::Publisher removePublisher;
-    // Runtime follow_mode changes (setFollowMode()) -- separate from the
-    // spawn-time follow_mode:= launch argument, which only sets the
-    // initial SDF value. followModeIndex mirrors viewIndex below: index
-    // into FollowModeLabels()/kFollowModeValues, kept in sync so the
-    // global combo shows this human's actual current mode when switched
-    // to, rather than always resetting to "テレオペ".
-    gz::transport::Node::Publisher followModePublisher;
-    int followModeIndex{0};
-    // Named-pose intent (pose_topic) -- only advertised for pose-capable
-    // actor humans (see IsPoseCapableIndex()), same as jumpPublisher above.
-    // lockedPose is the L key's registered pose: non-empty means this human
-    // holds that pose on its own, with no key held down, until it's
-    // unregistered -- see UpdatePoseIntent()/togglePoseLock() in the .cc.
-    gz::transport::Node::Publisher posePublisher;
-    // Last viewpoint setViewpoint() applied to this human (0 = free/never
-    // set). Lets the global viewpoint combo (see ActiveViewIndex()) show
-    // the right selection when switching which human is active, instead
-    // of always resetting to "自由視点".
-    int viewIndex{0};
-    double viewDistance{2.0};
-
-    // Collision-body debug visualization (see human_collision_body/
-    // model.sdf's translucent capsule) -- only meaningful for actor-backed
-    // humans, same as velocityPublisher above (checked the same way:
-    // velocityPublisher.Valid()). showCollision is the desired on/off
-    // state (setShowCollision()/setShowCollisionAll()); the other two are
-    // ApplyCollisionVisibility()'s own render-thread bookkeeping.
-    //
-    // Defaults to hidden: the capsule is a debug aid (see
-    // human_collision_body/model.sdf's own comment), not something a user
-    // driving/watching a human normally wants cluttering the view, so it
-    // starts off and has to be opted into per row (or via "all") from the
-    // panel. appliedShowCollision still starts at the tri-state "nothing
-    // applied yet" below, so this hidden state is explicitly pushed to the
-    // freshly-spawned collision body on frame one rather than assumed.
-    //
-    // appliedShowCollision is deliberately a tri-state int (-1 = nothing
-    // applied yet) rather than a bool, so a freshly (re)spawned
-    // collision body always gets the current state pushed to it even when
-    // that state happens to equal the previous one -- see
-    // applyCollisionSize(), which resets it.
-    bool showCollision{false};
-    int appliedShowCollision{-1};
-    int collisionVisualRetries{0};
-    // Current capsule dimensions, updated by applyCollisionSize() -- kept
-    // here so the QML size sliders can read back what's actually applied
-    // (collisionRadiusAt()/collisionLengthAt()) when switching which human
-    // is active, same idea as followModeIndex/viewIndex above. Defaults
-    // match models/human_collision_body/model.sdf's own spawn-time values.
-    double collisionRadius{0.25};
-    double collisionLength{1.2};
-
-    // Crowd/SFM feature set -- see the Q_PROPERTY block's comment at the
-    // top of this class. The route itself and the useSfm/cyclicRoute
-    // settings are global now (one route applied to every ticked target);
-    // what stays per-human is whether this human is one of those targets,
-    // and sfmEnabled, which mirrors whatever this panel last published on
-    // sfmEnablePublisher -- kept here (rather than re-deriving it) purely
-    // so ActiveSfmEnabled() can show the right toggle state without an
-    // extra round trip.
-    bool routeTarget{true};
-    bool sfmEnabled{true};
-    gz::transport::Node::Publisher sfmEnablePublisher;
-
-    // Spawn marker (see setShowSpawnMarker()/ApplySpawnMarkers()): where
-    // this human was originally spawned, the colour its marker is drawn in,
-    // and the same "desired vs. applied" pair ApplyCollisionVisibility()
-    // uses -- appliedShowSpawnMarker is a tri-state int (-1 = nothing
-    // applied yet) for the same reason appliedShowCollision is.
-    //
-    // markerVisual is the render-scene visual itself, created lazily on the
-    // render thread and owned here so removeHuman() can queue exactly that
-    // one for destruction. Shown by default: the whole point of the marker
-    // is to see where people started without having to ask for it.
-    double spawnX{0.0};
-    double spawnY{0.0};
-    double spawnZ{0.0};
-    int markerColorIndex{0};
-    bool showSpawnMarker{true};
-    int appliedShowSpawnMarker{-1};
-    gz::rendering::VisualPtr markerVisual;
-
-    // サーバー（ActorCommandPlugin）が state_topic へ流してくる状態。
-    // 構想書 §3 のとおり、真実はサーバー側にあり、ここはその写しです。
-    // このパネルが「自分が送った指令」から推測した値ではありません。
-    //
-    // 購読は transport スレッドで走るので、読み書きは stateMutex の下で
-    // 行うこと（poses/poseMutex と同じ扱い）。
-    CharacterState characterState{CharacterState::Unknown};
-    /// \brief 保持中の名前付きポーズ。無ければ空。サーバーが決めた値。
-    std::string serverPose;
-    /// \brief 実測の並進速度 [m/s]。指令値ではありません。
-    double serverSpeed{0.0};
-    /// \brief 一度でも状態を受け取ったか。未受信と「Unknown を受信」を
-    ///        区別するため（古いサーバーと繋がっている場合に効きます）。
-    bool stateReceived{false};
-    /// \brief この人物の state トピック名。削除時に Unsubscribe するために
-    ///        持っておく（gz-transport の Subscribe はハンドルを返さず、
-    ///        トピック名で解除する）。
-    std::string stateTopic;
-  };
 
   /// \brief Pending camera command, written on the Qt thread by
   /// setViewpoint() and consumed on the render thread by ApplyViewpoint().
@@ -807,7 +694,9 @@ class HumanControlPanel : public gz::gui::Plugin
   private: mutable std::mutex stateMutex;
 
   private: QTimer *rosterTimer{nullptr};
-  private: std::vector<Human> humans;
+  /// \brief スポーン済みの人物一覧。struct Human ごと
+  ///        HumanRegistry.hh へ移した（構想書 §13 段階 2）。
+  private: HumanRegistry humans;
   private: std::string worldName;
   private: QString statusText{"ワールドを検出中…"};
   private: QStringList posePresetList;

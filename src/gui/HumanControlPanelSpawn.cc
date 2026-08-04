@@ -647,10 +647,10 @@ void HumanControlPanel::PollSpawnConfirmation(
   // Where this human actually ended up (after any spawn-safety adjustment
   // -- _x/_y are already the adjusted values by the time this runs), which
   // is what the spawn marker marks. Colour by spawn order, wrapping.
-  human.spawnX = _x;
-  human.spawnY = _y;
-  human.spawnZ = _z;
-  human.markerColorIndex = static_cast<int>(this->humans.size()) % kMarkerColorCount;
+  human.marker.x = _x;
+  human.marker.y = _y;
+  human.marker.z = _z;
+  human.marker.colorIndex = static_cast<int>(this->humans.size()) % kMarkerColorCount;
   if (IsActorIndex(modelIndex))
   {
     const std::string velocityTopic = "/" + nameStd + "/cmd_vel";
@@ -682,7 +682,7 @@ void HumanControlPanel::PollSpawnConfirmation(
     // see confirmRoute()/setSfmEnabled(). Advertised for every actor-backed
     // human regardless of useSfm so the toggle already works the moment a
     // route is later confirmed under SFM mode -- no separate re-wiring step.
-    human.sfmEnablePublisher =
+    human.route.sfmEnablePublisher =
         this->node.Advertise<gz::msgs::Boolean>("/" + nameStd + "/sfm_enable");
   }
   this->humans.push_back(std::move(human));
@@ -723,9 +723,9 @@ void HumanControlPanel::removeHuman(int _index)
   Human human = std::move(this->humans.at(_index));
   // 状態の購読を解除してから消す。残しておくと、同じ名前で再 spawn した
   // ときに古いハンドラが二重に走ります。
-  if (!human.stateTopic.empty())
-    this->node.Unsubscribe(human.stateTopic);
-  this->humans.erase(this->humans.begin() + _index);
+  if (!human.server.topic.empty())
+    this->node.Unsubscribe(human.server.topic);
+  this->humans.erase(static_cast<std::size_t>(_index));
   this->humansChanged();
 
   // Scene nodes may only be destroyed on the render thread; hand this

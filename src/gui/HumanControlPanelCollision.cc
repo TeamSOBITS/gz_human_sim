@@ -54,7 +54,7 @@ bool HumanControlPanel::showCollisionAt(int _index) const
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return false;
-  return this->humans.at(_index).showCollision;
+  return this->humans.at(_index).collision.show;
 }
 
 void HumanControlPanel::setShowCollision(int _index, bool _value)
@@ -64,11 +64,11 @@ void HumanControlPanel::setShowCollision(int _index, bool _value)
   auto &human = this->humans.at(_index);
   if (!human.velocityPublisher.Valid())
     return;
-  human.showCollision = _value;
+  human.collision.show = _value;
   // A previous search that ran out of retries (kCollisionVisualMaxRetries)
   // must not make this human's button dead forever -- an explicit toggle
   // is exactly the moment to start looking again.
-  human.collisionVisualRetries = 0;
+  human.collision.retries = 0;
   // ApplyCollisionVisibility() (render thread, driven off Render events)
   // picks this up and applies it next frame -- see its own comment for
   // why this can't just be done synchronously here. humansChanged() lets
@@ -83,8 +83,8 @@ void HumanControlPanel::setShowCollisionAll(bool _value)
   {
     if (human.velocityPublisher.Valid())
     {
-      human.showCollision = _value;
-      human.collisionVisualRetries = 0;
+      human.collision.show = _value;
+      human.collision.retries = 0;
     }
   }
   this->humansChanged();
@@ -94,14 +94,14 @@ double HumanControlPanel::collisionRadiusAt(int _index) const
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return 0.25;
-  return this->humans.at(_index).collisionRadius;
+  return this->humans.at(_index).collision.radius;
 }
 
 double HumanControlPanel::collisionLengthAt(int _index) const
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return 1.2;
-  return this->humans.at(_index).collisionLength;
+  return this->humans.at(_index).collision.length;
 }
 
 void HumanControlPanel::applyCollisionSize(int _index, double _radius, double _length)
@@ -176,10 +176,10 @@ void HumanControlPanel::applyCollisionSize(int _index, double _radius, double _l
   // start out visible regardless of what this human's toggle says -- reset
   // to "nothing applied yet" so ApplyCollisionVisibility() pushes the
   // current state onto them once they appear.
-  human.appliedShowCollision = -1;
-  human.collisionVisualRetries = 0;
-  human.collisionRadius = _radius;
-  human.collisionLength = _length;
+  human.collision.applied = -1;
+  human.collision.retries = 0;
+  human.collision.radius = _radius;
+  human.collision.length = _length;
 
   // A create request for this name landing before the remove request has
   // actually been processed server-side would collide with the entity
@@ -244,21 +244,21 @@ void HumanControlPanel::ApplyCollisionVisibility()
     if (!human.velocityPublisher.Valid())
       continue;
 
-    const int desired = human.showCollision ? 1 : 0;
-    if (human.appliedShowCollision == desired)
+    const int desired = human.collision.show ? 1 : 0;
+    if (human.collision.applied == desired)
       continue;
-    if (human.collisionVisualRetries > kCollisionVisualMaxRetries)
+    if (human.collision.retries > kCollisionVisualMaxRetries)
       continue;
 
     const std::string collisionModelName = human.name + "_collision";
-    if (!this->SetCollisionBodyVisible(scene, collisionModelName, human.showCollision))
+    if (!this->SetCollisionBodyVisible(scene, collisionModelName, human.collision.show))
     {
       // Diagnostic (fires once per search that starts from scratch, not
       // every retried frame): the companion model normally just needs a
       // few more frames to appear, but if it never does, dumping every
       // scene visual whose name mentions "collision" shows what naming
       // scheme this gz-sim version's scene actually uses.
-      if (human.collisionVisualRetries == 0)
+      if (human.collision.retries == 0)
       {
         gzmsg << "[HumanControlPanel] collision-visual '" << collisionModelName
               << "' not found among " << scene->VisualCount()
@@ -277,11 +277,11 @@ void HumanControlPanel::ApplyCollisionVisibility()
           gzmsg << "(none)";
         gzmsg << std::endl;
       }
-      ++human.collisionVisualRetries;
+      ++human.collision.retries;
       continue;
     }
-    human.appliedShowCollision = desired;
-    human.collisionVisualRetries = 0;
+    human.collision.applied = desired;
+    human.collision.retries = 0;
   }
 }
 }  // namespace gz_human_sim

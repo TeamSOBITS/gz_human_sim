@@ -74,7 +74,7 @@ void HumanControlPanel::SubscribeCharacterState(int _index)
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return;
   auto &human = this->humans.at(_index);
-  if (!human.stateTopic.empty())
+  if (!human.server.topic.empty())
     return;
 
   // spawn_human.launch.py が namespace を前置するのと同じ組み立て方。
@@ -93,7 +93,7 @@ void HumanControlPanel::SubscribeCharacterState(int _index)
   {
     return;
   }
-  human.stateTopic = topic;
+  human.server.topic = topic;
 }
 
 void HumanControlPanel::OnCharacterState(
@@ -124,12 +124,12 @@ void HumanControlPanel::OnCharacterState(
     {
       if (human.name != _name)
         continue;
-      changed = !human.stateReceived || human.characterState != state ||
-          human.serverPose != pose;
-      human.characterState = state;
-      human.serverPose = pose;
-      human.serverSpeed = speed;
-      human.stateReceived = true;
+      changed = !human.server.received || human.server.state != state ||
+          human.server.pose != pose;
+      human.server.state = state;
+      human.server.pose = pose;
+      human.server.speed = speed;
+      human.server.received = true;
       break;
     }
   }
@@ -151,15 +151,15 @@ QString HumanControlPanel::characterStateAt(int _index) const
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return QString::fromUtf8(kStateLabels[0]);
   const auto &human = this->humans.at(_index);
-  if (!human.stateReceived)
+  if (!human.server.received)
     return QString::fromUtf8(kStateLabels[0]);
 
   // 保持中のポーズがあれば併記する。"姿勢を保持中" だけでは、どの姿勢なのか
   // 分からないため（poseLabel() が持っている日本語名を使う）。
-  const QString label = LabelFor(human.characterState);
-  if (human.serverPose.empty())
+  const QString label = LabelFor(human.server.state);
+  if (human.server.pose.empty())
     return label;
   return label + "（" +
-      this->poseLabel(QString::fromStdString(human.serverPose)) + "）";
+      this->poseLabel(QString::fromStdString(human.server.pose)) + "）";
 }
 }  // namespace gz_human_sim

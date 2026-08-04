@@ -55,7 +55,7 @@ bool HumanControlPanel::ActiveSfmEnabled() const
   if (this->activeHumanIndex < 0 ||
       this->activeHumanIndex >= static_cast<int>(this->humans.size()))
     return true;
-  return this->humans.at(this->activeHumanIndex).sfmEnabled;
+  return this->humans.at(this->activeHumanIndex).route.sfmEnabled;
 }
 
 bool HumanControlPanel::UseSfm() const
@@ -291,21 +291,21 @@ bool HumanControlPanel::routeTargetAt(int _index) const
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return false;
-  return this->humans.at(_index).routeTarget;
+  return this->humans.at(_index).route.isTarget;
 }
 
 void HumanControlPanel::setRouteTarget(int _index, bool _value)
 {
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return;
-  this->humans.at(_index).routeTarget = _value;
+  this->humans.at(_index).route.isTarget = _value;
   this->humansChanged();
 }
 
 void HumanControlPanel::setAllRouteTargets(bool _value)
 {
   for (auto &human : this->humans)
-    human.routeTarget = _value;
+    human.route.isTarget = _value;
   this->humansChanged();
 }
 
@@ -314,7 +314,7 @@ std::vector<int> HumanControlPanel::RouteTargetIndices() const
   std::vector<int> indices;
   for (std::size_t i = 0; i < this->humans.size(); ++i)
   {
-    if (this->humans[i].routeTarget)
+    if (this->humans.at(i).route.isTarget)
       indices.push_back(static_cast<int>(i));
   }
   // Nothing ticked: fall back to the active human so the button still does
@@ -352,12 +352,12 @@ void HumanControlPanel::setSfmEnabled(int _index, bool _value)
   if (_index < 0 || _index >= static_cast<int>(this->humans.size()))
     return;
   auto &human = this->humans.at(_index);
-  if (!human.sfmEnablePublisher.Valid())
+  if (!human.route.sfmEnablePublisher.Valid())
     return;
   gz::msgs::Boolean message;
   message.set_data(_value);
-  human.sfmEnablePublisher.Publish(message);
-  human.sfmEnabled = _value;
+  human.route.sfmEnablePublisher.Publish(message);
+  human.route.sfmEnabled = _value;
   if (_index == this->activeHumanIndex)
     this->sfmModeChanged();
   this->SetStatus(QString::fromStdString(human.name) + " のSFM（自動回避）を" +
@@ -422,12 +422,12 @@ void HumanControlPanel::SendSfmRegistration(int _index)
   // happened to be: a human that had been handed back to manual teleop
   // (sfm_enable false) would otherwise accept the registration and keep
   // standing still, which is exactly the "経路を確定しても歩かない" case.
-  if (human.sfmEnablePublisher.Valid())
+  if (human.route.sfmEnablePublisher.Valid())
   {
     gz::msgs::Boolean enableMessage;
     enableMessage.set_data(true);
-    human.sfmEnablePublisher.Publish(enableMessage);
-    human.sfmEnabled = true;
+    human.route.sfmEnablePublisher.Publish(enableMessage);
+    human.route.sfmEnabled = true;
   }
 }
 
@@ -466,12 +466,12 @@ void HumanControlPanel::SendSimplePath(int _index)
   // publishing its own cmd_vel every tick and would immediately overwrite
   // the path-follow motion. Hand the human back FIRST, so there is no
   // window where both are steering it.
-  if (human.sfmEnablePublisher.Valid() && human.sfmEnabled)
+  if (human.route.sfmEnablePublisher.Valid() && human.route.sfmEnabled)
   {
     gz::msgs::Boolean enableMessage;
     enableMessage.set_data(false);
-    human.sfmEnablePublisher.Publish(enableMessage);
-    human.sfmEnabled = false;
+    human.route.sfmEnablePublisher.Publish(enableMessage);
+    human.route.sfmEnabled = false;
   }
 
   human.pathPublisher.Publish(message);
@@ -518,7 +518,7 @@ void HumanControlPanel::confirmRoute()
   {
     double bodyRadius = 0.25;
     if (!targets.empty())
-      bodyRadius = this->humans.at(targets.front()).collisionRadius;
+      bodyRadius = this->humans.at(targets.front()).collision.radius;
     planned = this->PlanAroundObstacles(
         this->pendingRoute, bodyRadius, this->lastSentRoute);
     if (!planned && !this->NavPlannerAvailable())

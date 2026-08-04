@@ -62,8 +62,8 @@ void HumanControlPanel::setViewpoint(int _index, int _viewIndex, double _distanc
   // human later shows "自由視点" rather than a stale prior selection.
   if (_index >= 0 && _index < static_cast<int>(this->humans.size()))
   {
-    this->humans.at(_index).viewIndex = _viewIndex;
-    this->humans.at(_index).viewDistance = _distance;
+    this->humans.at(_index).camera.index = _viewIndex;
+    this->humans.at(_index).camera.distance = _distance;
     if (_index == this->activeHumanIndex)
       this->activeViewIndexChanged();
   }
@@ -163,7 +163,7 @@ void HumanControlPanel::resetToInitialView()
   if (this->activeHumanIndex >= 0 &&
       this->activeHumanIndex < static_cast<int>(this->humans.size()))
   {
-    this->humans.at(this->activeHumanIndex).viewIndex = kViewFree;
+    this->humans.at(this->activeHumanIndex).camera.index = kViewFree;
     this->activeViewIndexChanged();
   }
   std::lock_guard<std::mutex> lock(this->viewMutex);

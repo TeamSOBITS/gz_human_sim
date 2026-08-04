@@ -358,7 +358,7 @@ int HumanControlPanel::ActiveViewIndex() const
   if (this->activeHumanIndex < 0 ||
       this->activeHumanIndex >= static_cast<int>(this->humans.size()))
     return kViewFree;
-  return this->humans.at(this->activeHumanIndex).viewIndex;
+  return this->humans.at(this->activeHumanIndex).camera.index;
 }
 
 double HumanControlPanel::ActiveViewDistance() const
@@ -366,7 +366,7 @@ double HumanControlPanel::ActiveViewDistance() const
   if (this->activeHumanIndex < 0 ||
       this->activeHumanIndex >= static_cast<int>(this->humans.size()))
     return 2.0;
-  return this->humans.at(this->activeHumanIndex).viewDistance;
+  return this->humans.at(this->activeHumanIndex).camera.distance;
 }
 
 int HumanControlPanel::ActiveFollowModeIndex() const
@@ -415,7 +415,7 @@ int HumanControlPanel::RouteTargetCount() const
   int count = 0;
   for (const auto &human : this->humans)
   {
-    if (human.routeTarget)
+    if (human.route.isTarget)
       ++count;
   }
   return count;

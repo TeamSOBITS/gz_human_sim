@@ -90,6 +90,7 @@ add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanelSpawn.cc
   src/gui/HumanControlPanelState.cc
   src/gui/HumanControlPanel.hh
+  src/gui/HumanRegistry.hh
   src/gui/HumanControlPanelInternal.hh
   gui/HumanControlPanel.qrc
 )
