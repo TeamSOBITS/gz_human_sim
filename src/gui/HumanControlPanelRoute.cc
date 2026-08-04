@@ -274,7 +274,7 @@ void HumanControlPanel::undoLastSpawnPoint()
   if (this->pendingSpawnPoints.empty())
     return;
   this->pendingSpawnPoints.pop_back();
-  this->pendingSpawnMarkersDirty = true;
+  this->spawnMarkers.InvalidatePending();
   this->pendingSpawnPointsChanged();
 }
 
@@ -283,7 +283,7 @@ void HumanControlPanel::clearSpawnPoints()
   if (this->pendingSpawnPoints.empty())
     return;
   this->pendingSpawnPoints.clear();
-  this->pendingSpawnMarkersDirty = true;
+  this->spawnMarkers.InvalidatePending();
   this->pendingSpawnPointsChanged();
 }
 

@@ -154,7 +154,7 @@ void HumanControlPanel::LoadConfig(const tinyxml2::XMLElement *)
         packagePrefix = libPath.substr(0, libDir) + "/../../..";
     }
   }
-  // Magic-circle texture for the spawn markers (see CreateMarkerVisual).
+  // Magic-circle texture for the spawn markers (see SpawnMarkerRenderer).
   // Resolved from the same prefix; regenerate the asset itself with
   // `ros2 run guider_multifloor_builder guider_make_spawn_marker`, which
   // writes this copy and guide_robot's identical one together.
@@ -162,7 +162,7 @@ void HumanControlPanel::LoadConfig(const tinyxml2::XMLElement *)
     const std::string markerPath =
         packagePrefix + "/share/gz_human_sim/media/spawn_marker.png";
     if (std::ifstream(markerPath))
-      this->spawnMarkerTexturePath = markerPath;
+      this->spawnMarkers.SetTexturePath(markerPath);
     else
       gzwarn << "[HumanControlPanel] spawn marker texture not found at "
              << markerPath << "; markers will be drawn untextured.\n";

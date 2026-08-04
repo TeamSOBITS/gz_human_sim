@@ -107,7 +107,7 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
       // click on an upper floor actually put someone on that floor.
       this->pendingSpawnPoints.push_back(
           PickedPoint{point.X(), point.Y(), point.Z()});
-      this->pendingSpawnMarkersDirty = true;
+      this->spawnMarkers.InvalidatePending();
       this->pendingSpawnPointsChanged();
       this->SetStatus(QString("スポーン地点%1: (%2, %3, %4)")
           .arg(this->pendingSpawnPoints.size())

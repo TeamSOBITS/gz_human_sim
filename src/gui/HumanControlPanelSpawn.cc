@@ -270,7 +270,7 @@ void HumanControlPanel::spawnHumans(
   if (usePicked)
   {
     this->pendingSpawnPoints.clear();
-    this->pendingSpawnMarkersDirty = true;
+    this->spawnMarkers.InvalidatePending();
     this->pendingSpawnPointsChanged();
   }
   this->SetStatus(QString("%1人のspawnを開始しました（%2%3〜%2%4・%5）")
@@ -732,8 +732,7 @@ void HumanControlPanel::removeHuman(int _index)
   // Scene nodes may only be destroyed on the render thread; hand this
   // human's spawn marker over to ApplySpawnMarkers() to clean up.
   {
-    std::lock_guard<std::mutex> lock(this->markerMutex);
-    this->markerRemovalQueue.push_back("__spawn_marker_" + human.name);
+    this->spawnMarkers.QueueRemoval("__spawn_marker_" + human.name);
   }
 
   // Harmless no-op if this human was never registered with SfmCrowdSystem

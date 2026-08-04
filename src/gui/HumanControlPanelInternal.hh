@@ -137,47 +137,6 @@ inline constexpr int kCollisionVisualMaxRetries = 600;
 inline const char *const kNavPlanService = "/gz_human_sim/nav/plan_path";
 inline constexpr unsigned int kNavPlanTimeoutMs = 3000u;
 
-// Spawn-marker palette (see setShowSpawnMarker()/ApplySpawnMarkers()):
-// one colour per human, assigned in spawn order and wrapping around, so a
-// group of people spawned together can be told apart by their markers.
-// Deliberately saturated and well separated in hue rather than a smooth
-// ramp -- these are identity labels, not a scale.
-inline const double kMarkerColors[][3] = {
-  {0.95, 0.26, 0.21},  // red
-  {0.13, 0.59, 0.95},  // blue
-  {0.30, 0.69, 0.31},  // green
-  {1.00, 0.76, 0.03},  // amber
-  {0.61, 0.15, 0.69},  // purple
-  {0.00, 0.74, 0.83},  // cyan
-  {1.00, 0.44, 0.00},  // orange
-  {0.91, 0.12, 0.39},  // pink
-};
-inline constexpr int kMarkerColorCount =
-    static_cast<int>(sizeof(kMarkerColors) / sizeof(kMarkerColors[0]));
-
-// Spawn-marker disc geometry: a cylinder squashed flat and laid just above
-// the floor, wide enough to read as "a person starts here" from the default
-// overview camera without hiding the person standing on it.
-// Half-width of the magic-circle marker. Deliberately much bigger than
-// the 0.12 the old flat disc used: this panel is normally driven in a
-// whole building, and at a camera distance that shows a floor plan a
-// person-sized dot on the ground is simply not visible. 1.2 m across
-// reads from across a room without burying the spot it marks.
-inline constexpr double kMarkerRadius = 0.6;
-inline constexpr double kMarkerZ = 0.02;
-
-// Radians per second the circles turn. Slow on purpose: an idle animation
-// to catch the eye, not something competing with the humans for attention.
-inline constexpr double kMarkerSpinRate = 0.35;
-// Not-yet-spawned picked points are drawn in the same shape but neutral
-// white and more transparent -- they aren't anybody's marker yet.
-// Near-solid: at the camera distances these panels are actually used from,
-// anything much lower washes the circle out against a light floor. The
-// pending marker stays a little softer than a placed one purely so the two
-// are still tellable apart at a glance, not to make it subtle.
-inline constexpr double kMarkerAlpha = 0.97;
-inline constexpr double kPendingMarkerAlpha = 0.85;
-
 // kHumanModelDefaultZ[] for a model NAME rather than an index -- used by
 // setViewpoint()'s first-person case, which only has Human::model (a
 // string) to work from. 1.0 (the walking_actor/person_standing/

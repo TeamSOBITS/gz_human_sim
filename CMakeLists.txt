@@ -90,10 +90,12 @@ add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanelRoute.cc
   src/gui/HumanControlPanelSpawn.cc
   src/gui/HumanControlPanelState.cc
+  src/gui/SpawnMarkerRenderer.cc
   src/gui/CameraController.hh
   src/gui/HumanControlPanel.hh
   src/gui/HumanRegistry.hh
   src/gui/HumanControlPanelInternal.hh
+  src/gui/SpawnMarkerRenderer.hh
   gui/HumanControlPanel.qrc
 )
 target_compile_features(HumanControlPanel PUBLIC cxx_std_17)

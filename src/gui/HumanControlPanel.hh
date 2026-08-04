@@ -27,6 +27,7 @@
 // サーバー側と共有する状態の定義（構想書 §3）。
 #include "gz_human_sim/CharacterState.hh"
 #include "CameraController.hh"
+#include "SpawnMarkerRenderer.hh"
 #include "HumanRegistry.hh"
 
 namespace gz_human_sim
@@ -725,16 +726,10 @@ class HumanControlPanel : public gz::gui::Plugin
   /// this feature existed.
   private: std::string collisionBodyTemplate;
 
-  /// \brief Absolute path to media/spawn_marker.png (the magic-circle
-  /// texture), resolved once in LoadConfig() the same way
-  /// collisionBodyTemplate's path is. Empty if it could not be found, in
-  /// which case markers fall back to a plain tinted plane.
-  private: std::string spawnMarkerTexturePath;
-
-  /// \brief Time the spin angle of every marker is derived from, so they
-  /// rotate together at a rate independent of the GUI's frame rate.
-  private: std::chrono::steady_clock::time_point spawnMarkerEpoch;
-  private: bool spawnMarkerEpochValid{false};
+  /// \brief 床のスポーンマーカーの描画。人物のことは知らないクラスなので、
+  /// 誰にどのマーカーが要るかは HumanControlPanelOverlay.cc が決める。
+  /// 将来 guide_robot と共通の GUI 基盤パッケージへ出す予定（構想書 §12）。
+  private: SpawnMarkerRenderer spawnMarkers;
 
   /// \brief Advertises sfmRegisterPublisher/sfmUnregisterPublisher on first
   /// use (not in the constructor: worldName isn't known yet there, and
@@ -791,16 +786,6 @@ class HumanControlPanel : public gz::gui::Plugin
   /// entity tree -- see setShowSpawnMarker().
   private: void ApplySpawnMarkers();
 
-  /// \brief Creates one flat magic-circle marker visual named _name at
-  /// (_x, _y, _z), or nullptr if the scene won't build it. A single
-  /// texture-mapped plane rather than a pile of primitives, so a world
-  /// full of markers stays cheap; the texture is drawn white and tinted
-  /// here (translucent white while a point is only pending, the human's
-  /// own identity colour once it exists).
-  private: gz::rendering::VisualPtr CreateMarkerVisual(
-      const gz::rendering::ScenePtr &_scene, const std::string &_name,
-      double _x, double _y, double _z, int _colorIndex, bool _pending) const;
-
 
   private: gz::transport::Node::Publisher sfmRegisterPublisher;
   private: gz::transport::Node::Publisher sfmUnregisterPublisher;
@@ -844,17 +829,6 @@ class HumanControlPanel : public gz::gui::Plugin
   };
   private: std::vector<PickedPoint> pendingSpawnPoints;
 
-  /// \brief Render-scene visuals for pendingSpawnPoints (rebuilt whenever
-  /// the list length changes) and the names of markers whose human has been
-  /// removed, queued here on the Qt thread for ApplySpawnMarkers() to
-  /// actually destroy on the render thread.
-  private: std::vector<gz::rendering::VisualPtr> pendingSpawnMarkerVisuals;
-  /// \brief Set on every pendingSpawnPoints edit; ApplySpawnMarkers()
-  /// rebuilds the pending markers and clears it. See its own comment for
-  /// why a size comparison isn't enough.
-  private: bool pendingSpawnMarkersDirty{false};
-  private: std::mutex markerMutex;
-  private: std::vector<std::string> markerRemovalQueue;
 
 
 
