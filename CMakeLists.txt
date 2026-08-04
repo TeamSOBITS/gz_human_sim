@@ -21,12 +21,6 @@ find_package(gz-rendering8 REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Core)
 find_package(Boost REQUIRED)
 
-# DualSense/gamepad polling for HumanControlPanel's teleop mode -- SDL2's
-# GameController API (not a ROS joy node) so the plugin stays self-contained
-# like every other GUI plugin here (gz-transport/Qt only, no rclcpp). Mirrors
-# guide_robot's GuiderRobotManager, which this mode is modeled on.
-find_package(SDL2 REQUIRED)
-
 add_library(gz_human_actor_animation_control SHARED
   src/server/actor_animation_control_plugin.cpp
 )
@@ -90,13 +84,11 @@ add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanel.cc
   src/gui/HumanControlPanelCamera.cc
   src/gui/HumanControlPanelCollision.cc
-  src/gui/HumanControlPanelDualsense.cc
   src/gui/HumanControlPanelInput.cc
   src/gui/HumanControlPanelOverlay.cc
   src/gui/HumanControlPanelRoute.cc
   src/gui/HumanControlPanelSpawn.cc
   src/gui/HumanControlPanelState.cc
-  src/gui/HumanControlPanelTeleop.cc
   src/gui/HumanControlPanel.hh
   src/gui/HumanControlPanelInternal.hh
   gui/HumanControlPanel.qrc
@@ -115,7 +107,6 @@ target_link_libraries(HumanControlPanel
   gz-transport13::gz-transport13
   gz-msgs10::gz-msgs10
   Qt5::Core
-  SDL2::SDL2
 )
 
 install(PROGRAMS

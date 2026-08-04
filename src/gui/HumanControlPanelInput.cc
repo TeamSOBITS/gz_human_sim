@@ -39,11 +39,6 @@
 #include <gz/rendering/Scene.hh>
 #include <gz/rendering/Visual.hh>
 
-// DualSense/gamepad polling only -- SDL_INIT_GAMECONTROLLER (never
-// SDL_INIT_VIDEO), so this never touches windowing/GL and cannot conflict
-// with the already-running Ogre2/Qt scene. See PollDualsense(). Mirrors
-// guide_robot's GuiderRobotManager, which this mode is modeled on.
-#include <SDL2/SDL.h>
 
 #include "HumanControlPanelInternal.hh"
 
@@ -53,26 +48,23 @@
 // unchanged from that file.
 //
 // ---------------------------------------------------------------------------
-// このファイルのキーボード部分は「キーボード操作用の新パッケージ」へ移管予定です
+// キーボード操作はこのパッケージから削除済みです
 // ---------------------------------------------------------------------------
-// 移管先: 未作成（unified_entity_control とは別のパッケージ）
-//   eventFilter() のキー押下/離上の分岐一式（W/A/D/X、Q/E/Z/C、S/J/N/L/K、
-//   Shift/Ctrl、数字キーによる対象切替、Enter によるジャンプ）
+// W/A/D/X、Q/E/Z/C、S/J/N/L/K、Shift/Ctrl、数字キーによる対象切替、
+// Enter によるジャンプ -- いずれも削除しました。人物の操作は
+// unified_entity_control（ゲームパッド）と、これから作るキーボード用
+// パッケージが担当します。経緯は 構想書/gz_human_sim再設計構想.md §11。
 //
-// 移管しないもの（gz_human_sim に残る）:
-//   LeftClickToScene の分岐 -- 経路の waypoint 打ちとスポーン位置のクリックは
-//   「操作」ではなく「世界の編集」なので、このパッケージに残ります。
+// ここに残っているのは LeftClickToScene の分岐だけです。経路の waypoint
+// 打ちとスポーン位置のクリックは「操作」ではなく「世界の編集」なので、
+// このパッケージの仕事です。
 //
-// 移管時の注意:
-//   - IsTextEditFocused() の除外は必ず引き継ぐこと。これが無いと名前欄に
+// キーボード操作を新パッケージへ実装するときの注意（ここにあった知見）:
+//   - IsTextEditFocused() 相当の除外を必ず入れること。無いと名前欄に
 //     "human1" と打つだけで人物が走り出します。
 //   - isAutoRepeat() の除外も同様。
-//   - 現状は押しっぱなし（Held）しか見ていません。移管先では
-//     Pressed / Held / Released を区別してください。トグル操作
-//     （例: ○で着席・起立）は現状の作りでは書けません。
-//
-// それまでは、このファイルはこのまま動き続けます。先に消さないでください。
-// 経緯は 構想書/gz_human_sim再設計構想.md §11 を参照。
+//   - 押しっぱなし（Held）だけでなく Pressed / Released も区別すること。
+//     トグル操作（例: ○で着席・起立）は Held だけでは書けません。
 // ---------------------------------------------------------------------------
 
 namespace gz_human_sim
@@ -84,7 +76,6 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
     this->ApplyViewpoint();
     this->ApplyCollisionVisibility();
     this->ApplySpawnMarkers();
-    this->PollDualsense();
   }
   else if (_event->type() == gz::gui::events::LeftClickToScene::kType)
   {
@@ -126,159 +117,6 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
     // Neither mode on: deliberately does nothing, leaving ordinary clicking
     // in the viewport (selection, camera work) alone -- see the
     // routeRecording Q_PROPERTY's comment.
-  }
-  else if (_event->type() == QEvent::KeyPress || _event->type() == QEvent::KeyRelease)
-  {
-    auto *keyEvent = static_cast<QKeyEvent *>(_event);
-    const bool pressed = _event->type() == QEvent::KeyPress;
-    // Shift/Ctrl/S are tracked as plain held-state (not read off
-    // modifiers()/a per-key switch at the moment a direction key fires) so
-    // QML buttons can also read shiftHeld/ctrlHeld/sHeld/jHeld live for
-    // mouse-driven clicks, and so S -- not a real Qt modifier -- can be
-    // tracked the same way as Shift/Ctrl. Not gated on IsTextEditFocused()
-    // (unlike the direction dispatch below) so these stay accurate even
-    // while a name/x/y/z field has focus elsewhere in the panel.
-    if (keyEvent->key() == Qt::Key_Shift && !keyEvent->isAutoRepeat() &&
-        pressed != this->shiftHeldState)
-    {
-      this->shiftHeldState = pressed;
-      this->shiftHeldChanged();
-      // Live speed/mode react to Shift toggling mid-hold -- e.g. holding W
-      // and THEN pressing Shift starts running immediately, no need to
-      // release and re-press W. See RefreshHeldMovementSpeed().
-      this->RefreshHeldMovementSpeed();
-    }
-    else if (keyEvent->key() == Qt::Key_Control && !keyEvent->isAutoRepeat() &&
-        pressed != this->ctrlHeldState)
-    {
-      this->ctrlHeldState = pressed;
-      this->ctrlHeldChanged();
-      this->RefreshHeldMovementSpeed();
-    }
-    else if (keyEvent->key() == Qt::Key_S && !keyEvent->isAutoRepeat() &&
-        pressed != this->sHeldState)
-    {
-      this->sHeldState = pressed;
-      this->sHeldChanged();
-    }
-    else if (keyEvent->key() == Qt::Key_J && !keyEvent->isAutoRepeat() &&
-        pressed != this->jHeldState)
-    {
-      this->jHeldState = pressed;
-      this->jHeldChanged();
-      // J is the strafe-mode modifier -- live-switch a currently-held key
-      // between turn-to-face and strafe the same way Shift/Ctrl live-swap
-      // speed above.
-      this->RefreshHeldMovementSpeed();
-    }
-    else if (!keyEvent->isAutoRepeat() && PoseShortcutForKey(keyEvent->key()))
-    {
-      // Hold-to-pose (K = sit, see kPoseShortcuts): pressing publishes that
-      // pose's name, releasing publishes "no pose" again -- unless the
-      // active human has a pose REGISTERED, in which case the registered one
-      // keeps winning (see UpdatePoseIntent()). Tracked as plain held-state,
-      // same as Shift/Ctrl/S/J above, so QML can read heldPose too.
-      const std::string pose =
-          pressed ? PoseShortcutForKey(keyEvent->key())->pose : std::string();
-      if (pose != this->heldPoseState)
-      {
-        this->heldPoseState = pose;
-        this->heldPoseChanged();
-        this->UpdatePoseIntent(this->activeHumanIndex);
-      }
-    }
-    if (!keyEvent->isAutoRepeat() && !IsTextEditFocused())
-    {
-      if (pressed && keyEvent->key() == Qt::Key_L)
-      {
-        // L registers the active human's CURRENT pose, so it keeps holding
-        // it once the pose key is released; pressing L again unregisters.
-        // Same Q_INVOKABLE the QML button uses.
-        //
-        // Note this is "register whatever pose is happening now", not "sit"
-        // -- which is why it's a separate key from K rather than a modifier
-        // on it, and why it keeps working unchanged as more poses are added.
-        this->togglePoseLock(this->activeHumanIndex);
-      }
-      else if (pressed && keyEvent->key() >= Qt::Key_1 && keyEvent->key() <= Qt::Key_9)
-      {
-        this->setActiveHuman(keyEvent->key() - Qt::Key_1);
-      }
-      else if (pressed &&
-          (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter))
-      {
-        // Jump in place, or -- if a direction key is still held -- while
-        // continuing to move that way (teleopJump() only adds a Z arc, the
-        // held key(s)' horizontal Twist keeps applying unchanged).
-        this->teleopJump(this->activeHumanIndex);
-      }
-      else if (pressed && keyEvent->key() == Qt::Key_N)
-      {
-        // Immediate stop -- this is S's old job; S is now the
-        // turn-to-face modifier (see sHeldState above/teleopDirection()).
-        this->heldDirectionKeys.clear();
-        this->teleopStop(this->activeHumanIndex);
-      }
-      else
-      {
-        std::string direction;
-        switch (keyEvent->key())
-        {
-          case Qt::Key_Q: direction = "Q"; break;
-          case Qt::Key_W: direction = "W"; break;
-          case Qt::Key_E: direction = "E"; break;
-          case Qt::Key_A: direction = "A"; break;
-          case Qt::Key_D: direction = "D"; break;
-          case Qt::Key_Z: direction = "Z"; break;
-          case Qt::Key_X: direction = "X"; break;
-          case Qt::Key_C: direction = "C"; break;
-          default: break;
-        }
-        if (!direction.empty())
-        {
-          if (this->sHeldState && (direction == "A" || direction == "D"))
-          {
-            // S+A / S+D: spin in place (A = counterclockwise, D =
-            // clockwise) instead of walking -- see teleopRotate(). This
-            // is S's whole remaining job now that plain movement below
-            // always turns to face where it's going anyway.
-            this->heldDirectionKeys.clear();
-            if (pressed)
-              this->teleopRotate(this->activeHumanIndex, direction == "A");
-            else
-              this->teleopStop(this->activeHumanIndex);
-          }
-          else if (IsSteerableDirection(direction))
-          {
-            // W/A/D/X go through the held-key tracker: PressDirectionKey()/
-            // ReleaseDirectionKey() decide there whether a solo key turns
-            // to face and walks, or (J strafe mode, or a 2nd key joining
-            // for the curving combo) falls through to the old strafe/curve
-            // Twist via ApplyHeldDirectionKeys().
-            if (pressed)
-              this->PressDirectionKey(direction);
-            else
-              this->ReleaseDirectionKey(direction);
-          }
-          else if (pressed)
-          {
-            // Diagonals (Q/E/Z/C): always single-shot immediate. Turn to
-            // face and walk by default, same as W/A/D/X; J held switches
-            // to the original no-turn strafe (see PressDirectionKey()'s
-            // matching override).
-            this->heldDirectionKeys.clear();
-            const bool turnToFace = !this->jHeldState;
-            this->teleopDirection(
-                this->activeHumanIndex, QString::fromStdString(direction), turnToFace);
-          }
-          else
-          {
-            this->heldDirectionKeys.clear();
-            this->teleopStop(this->activeHumanIndex);
-          }
-        }
-      }
-    }
   }
   return QObject::eventFilter(_obj, _event);
 }

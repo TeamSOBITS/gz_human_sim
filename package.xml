@@ -30,12 +30,6 @@
   <depend>qtbase5-dev</depend>
   <depend>qtdeclarative5-dev</depend>
   <depend>boost</depend>
-  <!-- rosdep key is "sdl2"; it resolves to the libsdl2-dev apt package.
-       Spelling the apt name here instead makes `rosdep install` fail with
-       "Cannot locate rosdep definition", which on a fresh machine means
-       SDL2 never gets installed and the build stops at find_package(SDL2). -->
-  <depend>sdl2</depend>
-
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

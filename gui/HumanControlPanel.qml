@@ -10,9 +10,7 @@ Rectangle {
   // lot since 560 was first picked here (follow-mode combos, path
   // templates, the viewpoint block, ...) and previously just kept getting
   // squeezed -- the fixed-height stuff would silently eat the spawned-
-  // humans ListView's space (Layout.fillHeight: true) down to a sliver,
-  // taking the per-row 削除/teleop pad with it even though they were still
-  // there in the tree. Now everything below lives inside a ScrollView
+  // humans ListView's space (Layout.fillHeight: true) down to a sliver. Now everything below lives inside a ScrollView
   // instead, so this only needs to be a *reasonable starting* height, not
   // a tally of every field added since -- anything that doesn't fit just
   // scrolls.
@@ -148,7 +146,8 @@ Rectangle {
     // have no ActorCommandPlugin, so follow_mode means nothing for them.
     // "テレオペ" (auto) is right for almost everyone; "経路専用" is for a
     // background character that should keep walking its route no matter
-    // what, ignoring a stray teleop press aimed at it by mistake.
+    // what, ignoring a stray velocity command aimed at it by mistake。
+    // 操作そのものは unified_entity_control が担当する（構想書 §11）。
     Label {
       visible: HumanControlPanel.isActorModel(selectedModelIndex)
       text: "動作モード"; color: "#536b67"
@@ -447,7 +446,7 @@ Rectangle {
             Button {
               text: "対象にする"
               // Any human can be the viewpoint target; only actor-backed
-              // ones actually respond to QWEASDZXC teleop, but selecting a
+              // ones actually respond to velocity commands, but selecting a
               // static one here still drives the global viewpoint panel
               // below.
               visible: HumanControlPanel.activeHumanIndex !== index
@@ -524,66 +523,6 @@ Rectangle {
             }
           }
 
-          // Teleop pad: press-and-hold buttons publish Twist while pressed
-          // and stop on release. Layout mirrors the QWEASDZXC keyboard
-          // shortcuts in HumanControlPanel::eventFilter() (Q W E / A S D /
-          // Z X C, S = stop) so mouse and keyboard drive this human the
-          // same way; the keyboard shortcuts always target whichever human
-          // is マークed "操作対象" (⌨) above, not necessarily this row.
-          GridLayout {
-            id: teleopPad
-            // The ListView delegate's own `index` (this human's row) would
-            // otherwise be shadowed by the Repeater below's delegate-local
-            // `index` (0-8, the direction-button's own position) -- capture
-            // it under a distinct name before entering that inner scope.
-            property int humanIndex: index
-            visible: HumanControlPanel.isHumanActorAt(humanIndex)
-            columns: 3
-            rowSpacing: 2
-            columnSpacing: 2
-
-            // Repeater over the QWEASDZXC layout instead of 9 near-identical
-            // Button blocks. Each Button gets its own contentItem (plain,
-            // non-eliding, wrapping Text) rather than the QQC2 default
-            // style's single-line elided Text -- that default silently
-            // collapsed our two-line "Q\n↖" labels down to just "…" at this
-            // button size.
-            Repeater {
-              model: [
-                {key: "Q", glyph: "↖"}, {key: "W", glyph: "↑"}, {key: "E", glyph: "↗"},
-                {key: "A", glyph: "←"}, {key: "N", glyph: "■"}, {key: "D", glyph: "→"},
-                {key: "Z", glyph: "↙"}, {key: "X", glyph: "↓"}, {key: "C", glyph: "↘"},
-              ]
-              delegate: Button {
-                Layout.preferredWidth: 40
-                Layout.preferredHeight: 40
-                contentItem: Text {
-                  text: modelData.key + "\n" + modelData.glyph
-                  horizontalAlignment: Text.AlignHCenter
-                  verticalAlignment: Text.AlignVCenter
-                  wrapMode: Text.WordWrap
-                  font.pixelSize: 12
-                }
-                // Movement keys turn to face where they're walking by
-                // default now (see teleopDirection()'s _turnToFace),
-                // matching the keyboard's diagonal-key branch: J held
-                // switches back to the old no-turn strafe. S-held-click on
-                // A/D instead spins in place (teleopRotate()), same as
-                // S+A/S+D from the keyboard.
-                onPressed: {
-                    if (modelData.key === "N") return
-                    if (HumanControlPanel.sHeld && (modelData.key === "A" || modelData.key === "D"))
-                        HumanControlPanel.teleopRotate(teleopPad.humanIndex, modelData.key === "A")
-                    else
-                        HumanControlPanel.teleopDirection(teleopPad.humanIndex, modelData.key,
-                            !HumanControlPanel.jHeld)
-                }
-                onReleased: HumanControlPanel.teleopStop(teleopPad.humanIndex)
-                onClicked: if (modelData.key === "N")
-                    HumanControlPanel.teleopStop(teleopPad.humanIndex)
-              }
-            }
-          }
         }
       }
     }
@@ -696,110 +635,6 @@ Rectangle {
       }
     }
 
-    // ── 移動パラメーター（ジャンプ・速度）─────────────────
-    // ジャンプ高さ・基準移動速度はキー操作対象(activeHumanIndex)にかかる
-    // グローバル設定 -- shiftHeld/ctrlHeld/sHeld/jHeld と同じ扱いで、対象人物を
-    // 切り替えても値は維持される。基準速度はCtrl（ゆっくり歩く）/Shift
-    // （走る）を押していない、通常の移動時の速度。Ctrl/Shiftを押すと
-    // この基準速度に対してさらに倍率がかかる。
-    Rectangle { Layout.fillWidth: true; height: 1; color: "#c7d8d4" }
-    Label { text: "移動パラメーター"; color: "#183b37"; font.bold: true }
-    RowLayout {
-      Layout.fillWidth: true
-      spacing: 4
-      Label { text: "ジャンプの高さ[m]"; color: "#536b67" }
-      Slider {
-        id: jumpHeightSlider
-        Layout.fillWidth: true
-        from: 0.05
-        to: 1.5
-        Component.onCompleted: value = HumanControlPanel.jumpHeight
-        onMoved: HumanControlPanel.setJumpHeight(value)
-      }
-      Label {
-        text: HumanControlPanel.jumpHeight.toFixed(2)
-        color: "#536b67"
-        Layout.preferredWidth: 34
-      }
-    }
-    RowLayout {
-      Layout.fillWidth: true
-      spacing: 8
-      Label { text: "基準移動速度"; color: "#536b67" }
-      Slider {
-        id: speedMultiplierSlider
-        Layout.fillWidth: true
-        from: 0.1
-        to: 4.0
-        Component.onCompleted: value = HumanControlPanel.speedMultiplier
-        onMoved: HumanControlPanel.setSpeedMultiplier(value)
-      }
-      Label {
-        text: (HumanControlPanel.ctrlHeld ? "遅い" :
-            (HumanControlPanel.shiftHeld ? "走る" : "歩く")) +
-            "（x" + HumanControlPanel.speedMultiplier.toFixed(2) + "）"
-        color: "#536b67"
-        Layout.preferredWidth: 92
-      }
-      Button {
-        text: "⤴ ジャンプ"
-        enabled: HumanControlPanel.activeHumanIndex >= 0 &&
-            HumanControlPanel.isHumanActorAt(HumanControlPanel.activeHumanIndex)
-        onClicked: HumanControlPanel.teleopJump(HumanControlPanel.activeHumanIndex)
-      }
-    }
-    Connections {
-      target: HumanControlPanel
-      function onJumpHeightChanged() {
-        jumpHeightSlider.value = HumanControlPanel.jumpHeight
-      }
-      function onSpeedMultiplierChanged() {
-        speedMultiplierSlider.value = HumanControlPanel.speedMultiplier
-      }
-    }
-
-    // ── DualSense mode ───────────────────────────────────
-    // Left stick drives activeHumanIndex (full 360°移動、上の「基準移動速度」
-    // スライダーがそのまま適用される)、右スティックはカメラをその人物の
-    // 周りで旋回させる -- キーボード/矢印パッドの代替であり、併用も可能
-    // （どちらもHumanControlPanel.teleopMove()を呼ぶだけ）。
-    // guide_robotのGuiderRobotManagerと同じ仕組み。
-    Rectangle { Layout.fillWidth: true; height: 1; color: "#c7d8d4" }
-    Label { text: "DualSenseモード"; color: "#183b37"; font.bold: true }
-    RowLayout {
-      Layout.fillWidth: true
-      CheckBox {
-        text: "有効化"
-        checked: HumanControlPanel.dualsenseModeEnabled
-        onToggled: HumanControlPanel.dualsenseModeEnabled = checked
-      }
-      Label {
-        Layout.fillWidth: true
-        wrapMode: Text.Wrap
-        text: HumanControlPanel.dualsenseStatusText
-        color: HumanControlPanel.dualsenseModeEnabled ? "#126e68" : "#8aa19c"
-      }
-    }
-    // 既定は「上に倒すと見上げる」(据置ゲーム機の標準)。以前は逆
-    // (フライトシム式)で固定だったので、その挙動が好みならここをON。
-    // GuiderRobotManager 側の同名設定と挙動を揃えてある。
-    CheckBox {
-      visible: HumanControlPanel.dualsenseModeEnabled
-      text: "視点の上下を反転（上に倒すと見下ろす）"
-      font.pixelSize: 12
-      checked: HumanControlPanel.invertCameraY
-      onToggled: HumanControlPanel.invertCameraY = checked
-    }
-    Label {
-      Layout.fillWidth: true
-      visible: HumanControlPanel.dualsenseModeEnabled
-      wrapMode: Text.Wrap
-      font.pixelSize: 10
-      color: "#8aa19c"
-      text: "左スティック=全方向移動、L2/R2=旋回、右スティック=視点。" +
-          "上の「基準移動速度」スライダーとShift/Ctrlがそのまま適用されます。"
-    }
-
     // ── Follow mode (runtime) ──────────────────────────────
     // Changes an already-spawned human's follow_mode live, via
     // ActorCommandPlugin's follow_mode_topic -- separate from the spawn
@@ -827,40 +662,6 @@ Rectangle {
       target: HumanControlPanel
       function onActiveFollowModeChanged() {
         runtimeFollowModeCombo.currentIndex = HumanControlPanel.activeFollowModeIndex
-      }
-    }
-
-    // ── 姿勢（walking_actorのみ） ──────────────────────────
-    // Lキーのマウス版。押している間だけのポーズキー（K＝着席）とは別に、
-    // 「いまの姿勢を登録」して押しっぱなしをやめても保持させるボタン。
-    // 現在の姿勢そのものを登録する方式なので、今後ポーズが増えても
-    // このボタンとLキーは変更なしでそのまま使える
-    // -- HumanControlPanel::togglePoseLock()を参照。
-    Rectangle {
-      Layout.fillWidth: true; height: 1; color: "#c7d8d4"
-      visible: HumanControlPanel.activeHumanIndex >= 0 &&
-          HumanControlPanel.isPoseCapableHumanAt(HumanControlPanel.activeHumanIndex)
-    }
-    RowLayout {
-      Layout.fillWidth: true
-      spacing: 8
-      visible: HumanControlPanel.activeHumanIndex >= 0 &&
-          HumanControlPanel.isPoseCapableHumanAt(HumanControlPanel.activeHumanIndex)
-      Label { text: "姿勢"; color: "#183b37"; font.bold: true }
-      Label {
-        // 「いま何をしているか」＝登録済みならそれ、なければ押されている
-        // ポーズキーのもの。登録の有無はボタン側のラベルが示す。
-        text: HumanControlPanel.poseLabel(
-            HumanControlPanel.activeLockedPose !== ""
-                ? HumanControlPanel.activeLockedPose : HumanControlPanel.heldPose)
-        color: "#536b67"
-      }
-      Button {
-        id: poseLockButton
-        Layout.fillWidth: true
-        text: HumanControlPanel.activeLockedPose !== ""
-            ? "姿勢の登録を解除" : "現在の姿勢を登録"
-        onClicked: HumanControlPanel.togglePoseLock(HumanControlPanel.activeHumanIndex)
       }
     }
 

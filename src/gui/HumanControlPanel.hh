@@ -9,12 +9,6 @@
 #include <utility>
 #include <vector>
 
-// Opaque SDL2 gamepad handle -- forward-declared (SDL2's own tag name for
-// the type behind `SDL_GameController`) so this header does not need to
-// include <SDL2/SDL.h> itself; only the .cc, which does the actual
-// polling, needs the real SDL API. Mirrors guide_robot's
-// GuiderRobotManager, which the DualSense mode here is modeled on.
-struct _SDL_GameController;
 
 #include <QObject>
 #include <QPointer>
@@ -72,41 +66,33 @@ class HumanControlPanel : public gz::gui::Plugin
   Q_PROPERTY(int activeHumanIndex READ ActiveHumanIndex NOTIFY activeHumanChanged)
   // Held state of Shift -- now the "run" modifier (see kRunFactor in the
   // .cc); no longer means turn-to-face (that moved to sHeld/Key_S below).
-  Q_PROPERTY(bool shiftHeld READ ShiftHeld NOTIFY shiftHeldChanged)
   // Held state of Ctrl -- the "slow walk" modifier (kSlowFactor).
-  Q_PROPERTY(bool ctrlHeld READ CtrlHeld NOTIFY ctrlHeldChanged)
   // Held state of S -- now a pure modifier key (no longer "stop", see
   // Key_N for that): S+direction turns the actor to face that direction
   // first, then walks forward, exactly what Shift+direction used to do.
-  Q_PROPERTY(bool sHeld READ SHeld NOTIFY sHeldChanged)
   // Held state of J -- the "strafe mode" modifier: J+direction reproduces
   // the original body-relative strafe (no turning, body stays facing
   // forward) instead of the default turn-to-face-then-walk. See
   // PressDirectionKey()/the eventFilter() diagonal-key branch.
-  Q_PROPERTY(bool jHeld READ JHeld NOTIFY jHeldChanged)
   // Which named pose (see kPoseShortcuts in the .cc) the operator is holding
   // a key down for right now, or "" for none. Currently K = "sit"; the point
   // of carrying a NAME rather than one bool per pose is that adding a second
   // pose later is one row in that table plus its clips in the model SDF,
   // with no new property, signal, or QML binding.
-  Q_PROPERTY(QString heldPose READ HeldPose NOTIFY heldPoseChanged)
   // The pose the active human has REGISTERED (L key / the panel button):
   // the pose it holds on its own, without a key being held down, until it's
   // unregistered. "" means nothing registered. Mirrors
   // activeFollowModeIndex's pattern: per-human state (Human::lockedPose),
   // reflected here only for whichever human is "対象" right now, for the QML
   // button/legend.
-  Q_PROPERTY(QString activeLockedPose READ ActiveLockedPose NOTIFY activeLockedPoseChanged)
   // Jump peak height (meters) used by teleopJump()/the Enter-key shortcut --
   // a global setting like shiftHeld above, not per-human. Adjustable live
   // from the QML slider (setJumpHeight()).
-  Q_PROPERTY(double jumpHeight READ JumpHeight NOTIFY jumpHeightChanged)
   // Baseline multiplier on kTeleopSpeed/kTeleopDiagonal for every teleop
   // Twist this panel publishes, adjustable from the QML slider
   // (setSpeedMultiplier()). Ctrl/Shift apply a further kSlowFactor/
   // kRunFactor on top of this at the moment a direction key is pressed --
   // see EffectiveSpeedMultiplier() in the .cc.
-  Q_PROPERTY(double speedMultiplier READ SpeedMultiplier NOTIFY speedMultiplierChanged)
   // Current viewpoint state of the active human, i.e. whatever setViewpoint()
   // last set for humans[activeHumanIndex]. Single global viewpoint controls
   // (see the QML) bind to these instead of each spawned human owning its
@@ -186,15 +172,9 @@ class HumanControlPanel : public gz::gui::Plugin
   /// PollDualsense(). Independent of and layered on top of keyboard
   /// teleop, not exclusive with it. Mirrors guide_robot's
   /// GuiderRobotManager::dualsenseModeEnabled.
-  Q_PROPERTY(
-    bool dualsenseModeEnabled
-    READ DualsenseModeEnabled
-    WRITE SetDualsenseModeEnabled
-    NOTIFY dualsenseModeChanged)
 
   /// \brief Human-readable controller connection state for the QML label
   /// (e.g. "DualSense Wireless Controller 接続中" / "コントローラが見つかりません").
-  Q_PROPERTY(QString dualsenseStatusText READ DualsenseStatusText NOTIFY dualsenseStatusChanged)
 
   /// \brief 選択中の人物の状態（サーバーが publish した値の表示用）。
   ///        このパネルが推測した値ではありません -- 構想書 §3。
@@ -208,11 +188,6 @@ class HumanControlPanel : public gz::gui::Plugin
   /// what this panel did unconditionally before the flag existed. Kept
   /// identical to GuiderRobotManager's flag of the same name so the two
   /// panels never disagree about which way the stick goes.
-  Q_PROPERTY(
-    bool invertCameraY
-    READ InvertCameraY
-    WRITE SetInvertCameraY
-    NOTIFY invertCameraYChanged)
 
   public: HumanControlPanel();
   public: ~HumanControlPanel() override;
@@ -225,14 +200,6 @@ class HumanControlPanel : public gz::gui::Plugin
   public: QStringList HumanList() const;
   public: QString Status() const;
   public: int ActiveHumanIndex() const;
-  public: bool ShiftHeld() const;
-  public: bool CtrlHeld() const;
-  public: bool SHeld() const;
-  public: bool JHeld() const;
-  public: QString HeldPose() const;
-  public: QString ActiveLockedPose() const;
-  public: double JumpHeight() const;
-  public: double SpeedMultiplier() const;
   public: int ActiveViewIndex() const;
   public: double ActiveViewDistance() const;
   public: int ActiveFollowModeIndex() const;
@@ -247,17 +214,12 @@ class HumanControlPanel : public gz::gui::Plugin
   public: int RouteTargetCount() const;
   public: bool SpawnPicking() const;
   public: QStringList PendingSpawnPoints() const;
-  public: bool DualsenseModeEnabled() const;
-  public: void SetDualsenseModeEnabled(bool _enabled);
-  public: QString DualsenseStatusText() const;
 
   /// \brief 選択中の人物の状態を日本語ラベルで返す。未受信なら "—"。
   public: QString ActiveCharacterState() const;
 
   /// \brief _index の人物の状態ラベル。人物一覧の行に出す用。
   public: Q_INVOKABLE QString characterStateAt(int _index) const;
-  public: bool InvertCameraY() const;
-  public: void SetInvertCameraY(bool _enabled);
 
   /// \brief Suggested spawn name for a model index ("human1", "human2", …).
   public: Q_INVOKABLE QString defaultName(int _modelIndex) const;
@@ -298,18 +260,6 @@ class HumanControlPanel : public gz::gui::Plugin
   /// \brief Same as isHumanActorAt() but for the named-pose feature --
   /// whether the spawned human at this humanList row can be posed.
   public: Q_INVOKABLE bool isPoseCapableHumanAt(int _index) const;
-
-  /// \brief Register/unregister _index's current pose (L key, or the QML
-  /// button). Registering pins whatever pose the human is in right now --
-  /// including "standing", which simply means nothing is registered -- so it
-  /// keeps holding it once the pose key is released. Pressing it again
-  /// unregisters, dropping back to whatever a held key is currently asking
-  /// for. See UpdatePoseIntent() in the .cc.
-  ///
-  /// Deliberately "register the current pose" rather than "toggle sitting":
-  /// once there are more poses than sit, one key that means "stay like that"
-  /// keeps working for all of them without needing a lock key each.
-  public: Q_INVOKABLE void togglePoseLock(int _index);
 
   /// \brief Human-readable label for a pose name ("sit" -> "着席"), for
   /// status lines and the QML button. Empty name gives the "standing"/no
@@ -375,58 +325,6 @@ class HumanControlPanel : public gz::gui::Plugin
       const QString &_followMode, double _x, double _y, double _z, double _yaw);
 
   public: Q_INVOKABLE void removeHuman(int _index);
-  public: Q_INVOKABLE void teleopMove(
-      int _index, double _linear, double _lateral, double _angular);
-  public: Q_INVOKABLE void teleopStop(int _index);
-
-  /// \brief Enter-key / jump-button shortcut: publishes a one-shot jump
-  /// request (current jumpHeight) to _index's cmd_jump topic. Purely a
-  /// Z-axis overlay on the ActorCommandPlugin side -- whatever horizontal
-  /// velocity is already active (held W/A/D/X, teleopDirection(), a path,
-  /// ...) keeps driving X/Y/yaw unchanged, so holding a direction key and
-  /// pressing Enter jumps while still moving that way, same as in a 3D
-  /// game. Works a 2nd time while still airborne (double jump); a 3rd
-  /// press before landing is a no-op -- see
-  /// ActorCommandPlugin::JumpCallback()'s jumpCount guard.
-  public: Q_INVOKABLE void teleopJump(int _index);
-
-  /// \brief S+A / S+D shortcut: publishes a pure-angular Twist (no linear/
-  /// lateral) so the actor spins in place instead of walking --
-  /// _counterClockwise true for S+A (left), false for S+D (right). Scaled
-  /// by EffectiveSpeedMultiplier() same as any other movement, so Ctrl/
-  /// Shift still slow down/speed up the spin. Release (KeyRelease/
-  /// onReleased) should call teleopStop(), same as any other held key.
-  public: Q_INVOKABLE void teleopRotate(int _index, bool _counterClockwise);
-
-  /// \brief Manual, continuous jump-height set from the QML slider (meters,
-  /// clamped).
-  public: Q_INVOKABLE void setJumpHeight(double _height);
-
-  /// \brief Manual, continuous baseline speed-multiplier set from the QML
-  /// slider. Ctrl/Shift scale on top of whatever this is set to -- see
-  /// EffectiveSpeedMultiplier() in the .cc.
-  public: Q_INVOKABLE void setSpeedMultiplier(double _value);
-
-  /// \brief Move human _index one step of the movement layout (Q W E / A D
-  /// / Z X C around a vacated center -- matching the on-screen pad and the
-  /// keyboard shortcuts handled in eventFilter()). _turnToFace (the
-  /// default for ordinary movement now -- see PressDirectionKey()) sends
-  /// PublishTurnToFace()'s absolute-heading Twist, which
-  /// ActorCommandPlugin::PreUpdate() uses to smoothly steer the actor's
-  /// yaw toward that direction's fixed world heading while it keeps
-  /// walking forward the whole time -- a natural in-motion arc, not a
-  /// stop-in-place-then-walk, and since the target is an absolute world
-  /// angle (not relative to wherever the actor currently happens to be
-  /// facing), repeating the same direction key is always idempotent.
-  /// Passing false instead reproduces the original body-relative strafe
-  /// with no turning (X included -- straight-back strafe, i.e.
-  /// moonwalking), via the ordinary teleopMove() Twist; that's now only
-  /// reachable via the J "strafe mode" modifier (see PressDirectionKey()/
-  /// the eventFilter() diagonal-key branch). Either way, speed is
-  /// EffectiveSpeedMultiplier() (Ctrl slows, Shift speeds up). Stopping is
-  /// teleopStop(), not a "direction" here -- see Key_N in eventFilter().
-  public: Q_INVOKABLE void teleopDirection(
-      int _index, const QString &_direction, bool _turnToFace = false);
 
   /// \brief Which spawned human (index into humanList) the keyboard
   /// shortcuts (movement keys, 1-9 to switch target) currently drive.
@@ -591,9 +489,6 @@ class HumanControlPanel : public gz::gui::Plugin
     // ECM directly. Only valid for actor-backed humans, same as the two
     // publishers above.
     gz::transport::Node::Publisher removePublisher;
-    // Jump requests (see teleopJump()) -- only advertised for actor-backed
-    // humans, same as velocityPublisher/pathPublisher above.
-    gz::transport::Node::Publisher jumpPublisher;
     // Runtime follow_mode changes (setFollowMode()) -- separate from the
     // spawn-time follow_mode:= launch argument, which only sets the
     // initial SDF value. followModeIndex mirrors viewIndex below: index
@@ -608,13 +503,6 @@ class HumanControlPanel : public gz::gui::Plugin
     // holds that pose on its own, with no key held down, until it's
     // unregistered -- see UpdatePoseIntent()/togglePoseLock() in the .cc.
     gz::transport::Node::Publisher posePublisher;
-    std::string lockedPose;
-    // Bumped by every teleopDirection()/teleopStop() call for this human.
-    // "X" schedules a delayed second Twist (see teleopDirection()); that
-    // callback only fires if this still matches the value it captured,
-    // so a later key press/release in the meantime cancels it instead of
-    // stomping on whatever the user asked for next.
-    int teleopGeneration{0};
     // Last viewpoint setViewpoint() applied to this human (0 = free/never
     // set). Lets the global viewpoint combo (see ActiveViewIndex()) show
     // the right selection when switching which human is active, instead
@@ -884,84 +772,6 @@ class HumanControlPanel : public gz::gui::Plugin
   private: bool SetCollisionBodyVisible(const gz::rendering::ScenePtr &_scene,
       const std::string &_modelName, bool _visible) const;
 
-  /// \brief Key-down handler for W/A/D/X: adds _direction to
-  /// heldDirectionKeys (capped at 2 -- a 3rd simultaneous press is
-  /// ignored). Exactly 1 key held routes through teleopDirection(...,
-  /// true) (turn to face, then walk) unless J is held (the "strafe mode"
-  /// modifier), in which case it falls through to ApplyHeldDirectionKeys()
-  /// for the original no-turn strafe. 2 keys held always goes through
-  /// ApplyHeldDirectionKeys() for the curving combo, strafe-mode or not.
-  private: void PressDirectionKey(const std::string &_direction);
-
-  /// \brief Key-up handler for W/A/D/X: drops _direction from
-  /// heldDirectionKeys. Empty -> teleopStop(). Back down to exactly 1 key
-  /// -> same turn-to-face-then-walk restart as PressDirectionKey()'s
-  /// solo-key branch (unless J strafe mode, same override). Otherwise
-  /// (still 2, i.e. this doesn't currently happen) falls through to
-  /// ApplyHeldDirectionKeys().
-  private: void ReleaseDirectionKey(const std::string &_direction);
-
-  /// \brief Publishes the Twist for the current heldDirectionKeys onto
-  /// the active human. 2 keys (and J not held) is the curving combo:
-  /// PublishTurnToFace() toward the SECOND (most recently pressed) key's
-  /// absolute heading, same mechanism a solo turn-to-face key uses, so
-  /// the body curves in and then walks straight once it reaches that
-  /// heading rather than turning forever. Everything else (1 key, or J
-  /// strafe mode with either 1 or 2 keys) is a plain body-relative Twist
-  /// with angular always 0 -- only reached from PressDirectionKey()/
-  /// ReleaseDirectionKey() in J strafe mode, since the normal solo-key
-  /// case now goes through teleopDirection() instead (see those two for
-  /// why).
-  private: void ApplyHeldDirectionKeys();
-
-  /// \brief Publishes an absolute-heading turn-to-face Twist (angular.x
-  /// flag set, angular.z = _targetHeadingRad) directly, bypassing
-  /// teleopMove()'s plain-Twist shape -- see ActorCommandPlugin::
-  /// VelocityCallback() for how the two shapes are told apart, and
-  /// teleopDirection() for the only caller.
-  private: void PublishTurnToFace(int _index, double _speed, double _targetHeadingRad);
-
-  /// \brief Re-evaluates and republishes whatever heldDirectionKeys is
-  /// currently doing, using the just-changed Ctrl/Shift/J state -- called
-  /// right after shiftHeldState/ctrlHeldState/jHeldState update in
-  /// eventFilter() so e.g. holding W and THEN pressing Shift starts
-  /// running immediately, releasing Shift goes back to walking, all
-  /// without needing to let go of W. Safe to just re-call
-  /// ApplyHeldDirectionKeys() (2-key combo or solo J-strafe) or
-  /// teleopDirection(..., true) (solo turn-to-face) unconditionally in
-  /// either case now -- both are idempotent regardless of current state,
-  /// since turn-to-face targets an absolute heading rather than turning
-  /// relative to wherever the actor currently happens to be facing (see
-  /// teleopDirection()). Diagonal (Q/E/Z/C) keys aren't tracked in
-  /// heldDirectionKeys, so this intentionally doesn't cover them -- they
-  /// still pick up a new Ctrl/Shift/J state on their next press.
-  private: void RefreshHeldMovementSpeed();
-
-  /// \brief Recomputes which pose _index should be holding and publishes its
-  /// name to that human's posePublisher. The effective pose is the
-  /// registered one (Human::lockedPose) if there is one, else whichever pose
-  /// key is currently held -- and a held key only steers the ACTIVE human,
-  /// same as every other keyboard shortcut in this panel.
-  ///
-  /// Called from eventFilter() on every pose-key press/release and from
-  /// togglePoseLock(). No-op for non-pose-capable or non-actor humans
-  /// (posePublisher not advertised for those).
-  private: void UpdatePoseIntent(int _index);
-
-  /// \brief The pose _index should be in right now, per UpdatePoseIntent()'s
-  /// "registered wins over held" rule. Split out because togglePoseLock()
-  /// needs the same answer in order to know what to register.
-  private: std::string EffectivePose(int _index) const;
-
-  /// \brief this->speedMultiplierState (the QML slider's baseline) scaled
-  /// by kSlowFactor if Ctrl is held, kRunFactor if Shift is held, or 1.0 if
-  /// neither -- Ctrl and Shift aren't meant to combine, so Ctrl wins if
-  /// somehow both are down. Read fresh every time a Twist is (re)published
-  /// (teleopDirection(), ApplyHeldDirectionKeys(), teleopRotate(), and
-  /// RefreshHeldMovementSpeed() when a held key's speed needs to react to
-  /// a live Ctrl/Shift change).
-  private: double EffectiveSpeedMultiplier() const;
-
   /// \brief Handler for /world/<w>/dynamic_pose/info -- caches every
   /// entity's live (x, y, z, yaw) in poses, keyed by name. Runs on a
   /// transport thread; CheckProbeSettle() (Qt thread) reads it under
@@ -1002,20 +812,7 @@ class HumanControlPanel : public gz::gui::Plugin
   private: QString statusText{"ワールドを検出中…"};
   private: QStringList posePresetList;
   private: int activeHumanIndex{-1};
-  private: bool shiftHeldState{false};
-  private: bool ctrlHeldState{false};
-  private: bool sHeldState{false};
-  private: bool jHeldState{false};
-  /// \brief Name of the pose whose hold key is down right now (see
-  /// kPoseShortcuts in the .cc), or empty for none. One string rather than a
-  /// bool per pose so that adding poses needs no new state here.
-  private: std::string heldPoseState;
-  private: double jumpHeightState{1.0};
-  private: double speedMultiplierState{1.0};
 
-  /// \brief W/A/D/X keys currently held (S not held), in press order,
-  /// capped at 2 entries -- see PressDirectionKey()/ApplyHeldDirectionKeys().
-  private: std::vector<std::string> heldDirectionKeys;
 
   private: gz::rendering::CameraPtr userCamera;
   private: std::mutex viewMutex;
@@ -1157,38 +954,6 @@ class HumanControlPanel : public gz::gui::Plugin
   /// pending.
   private: bool EnsureUserCamera(const gz::rendering::ScenePtr &_scene);
 
-  /// \brief Render thread only, called every frame from eventFilter()
-  /// alongside ApplyViewpoint(): while dualsenseModeState is on, reads the
-  /// SDL game controller's stick/trigger axes and drives activeHumanIndex
-  /// (teleopMove()/teleopStop()) and the camera orbit
-  /// (ApplyDualsenseOrbit()). A no-op when the mode is off or no
-  /// controller is open. Unlike GuiderRobotManager's equivalent, humans
-  /// have no non-holonomic type to branch on -- ActorCommandPlugin always
-  /// accepts an independent lateral component (see DirectionToTwist()'s J
-  /// strafe mode), so the left stick always gives full continuous-angle
-  /// translation.
-  private: void PollDualsense();
-
-  /// \brief Continuously re-asserts the GUI camera's follow/track target
-  /// at an orbit offset driven by dualsenseOrbitYaw/Pitch/Distance
-  /// (updated each call from the right stick's _rightX/_rightY, already
-  /// deadzoned and normalized to -1..1). Unlike ApplyViewpoint()'s
-  /// discrete, one-shot ViewCommand, this runs every frame while
-  /// DualSense mode is on and bypasses the transition-gain/retry
-  /// machinery entirely. Mirrors GuiderRobotManager::ApplyDualsenseOrbit().
-  private: void ApplyDualsenseOrbit(double _rightX, double _rightY);
-
-  /// \brief Opens the first SDL game controller found (lazily
-  /// SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) on first use), setting
-  /// dualsenseStatusTextState either way. Called from
-  /// SetDualsenseModeEnabled(true).
-  private: void OpenDualsenseController();
-
-  /// \brief Closes the open controller (if any) and stops
-  /// activeHumanIndex's motion. Called from SetDualsenseModeEnabled(false)
-  /// and the destructor.
-  private: void CloseDualsenseController();
-
   private: gz::transport::Node::Publisher sfmRegisterPublisher;
   private: gz::transport::Node::Publisher sfmUnregisterPublisher;
   /// \brief Global route-recording toggle -- see the routeRecording
@@ -1254,31 +1019,8 @@ class HumanControlPanel : public gz::gui::Plugin
   private: double cameraY{0.0};
   private: bool cameraPosValid{false};
 
-  /// \brief SDL game controller handle (really an `SDL_GameController *`,
-  /// see the .cc), null while no DualSense/gamepad is open. Owned by this
-  /// plugin; opened in OpenDualsenseController(), closed in
-  /// CloseDualsenseController() and the destructor.
-  private: _SDL_GameController *dualsenseController{nullptr};
-  private: bool dualsenseModeState{false};
-  private: bool invertCameraYState{false};
-  private: QString dualsenseStatusTextState{"未接続"};
 
-  /// \brief True while the left stick was driving activeHumanIndex on the
-  /// previous PollDualsense() tick -- used to send exactly one
-  /// teleopStop() on the press->idle transition instead of a zero Twist
-  /// every single rendered frame the sticks sit centered.
-  private: bool dualsenseWasMoving{false};
 
-  /// \brief Render-thread-only orbit camera state for
-  /// ApplyDualsenseOrbit(), reset to the same offset kViewBehind uses
-  /// (yaw=0, pitch=0) whenever DualSense mode starts orbiting a different
-  /// human than last time (dualsenseOrbitTarget mismatch).
-  private: std::string dualsenseOrbitTarget;
-  private: double dualsenseOrbitYaw{0.0};
-  private: double dualsenseOrbitPitch{0.0};
-  private: double dualsenseOrbitDistance{3.0};
-  private: std::chrono::steady_clock::time_point dualsenseLastPollTime;
-  private: bool dualsenseLastPollValid{false};
 
   signals: void humansChanged();
   signals: void StatusChanged();
@@ -1291,18 +1033,7 @@ class HumanControlPanel : public gz::gui::Plugin
   signals: void spawnPickingChanged();
   signals: void routeSettingsChanged();
   signals: void sfmModeChanged();
-  signals: void shiftHeldChanged();
-  signals: void ctrlHeldChanged();
-  signals: void sHeldChanged();
-  signals: void jHeldChanged();
-  signals: void heldPoseChanged();
-  signals: void activeLockedPoseChanged();
-  signals: void jumpHeightChanged();
-  signals: void speedMultiplierChanged();
-  signals: void dualsenseModeChanged();
-  signals: void dualsenseStatusChanged();
   signals: void characterStateChanged();
-  signals: void invertCameraYChanged();
 };
 }  // namespace gz_human_sim
 #endif

@@ -39,11 +39,6 @@
 #include <gz/rendering/Scene.hh>
 #include <gz/rendering/Visual.hh>
 
-// DualSense/gamepad polling only -- SDL_INIT_GAMECONTROLLER (never
-// SDL_INIT_VIDEO), so this never touches windowing/GL and cannot conflict
-// with the already-running Ogre2/Qt scene. See PollDualsense(). Mirrors
-// guide_robot's GuiderRobotManager, which this mode is modeled on.
-#include <SDL2/SDL.h>
 
 #include "HumanControlPanelInternal.hh"
 

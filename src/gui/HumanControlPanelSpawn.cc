@@ -39,11 +39,6 @@
 #include <gz/rendering/Scene.hh>
 #include <gz/rendering/Visual.hh>
 
-// DualSense/gamepad polling only -- SDL_INIT_GAMECONTROLLER (never
-// SDL_INIT_VIDEO), so this never touches windowing/GL and cannot conflict
-// with the already-running Ogre2/Qt scene. See PollDualsense(). Mirrors
-// guide_robot's GuiderRobotManager, which this mode is modeled on.
-#include <SDL2/SDL.h>
 
 #include "HumanControlPanelInternal.hh"
 
@@ -667,8 +662,6 @@ void HumanControlPanel::PollSpawnConfirmation(
         this->node.Advertise<gz::msgs::Twist>(velocityTopic);
     human.pathPublisher =
         this->node.Advertise<gz::msgs::Pose_V>(pathTopic);
-    human.jumpPublisher =
-        this->node.Advertise<gz::msgs::Double>(jumpTopic);
     human.removePublisher =
         this->node.Advertise<gz::msgs::Empty>(removeTopic);
     human.followModePublisher =
@@ -710,7 +703,6 @@ void HumanControlPanel::PollSpawnConfirmation(
   this->activeHumanIndex = newIndex;
   this->activeHumanChanged();
   this->activeFollowModeChanged();
-  this->activeLockedPoseChanged();
 
   // 人物の初期デフォルト視点は後方追従（kViewBehind）。activeHumanIndex
   // をこの直前に設定しているので、setViewpoint()内のactiveViewIndexChanged()
@@ -761,7 +753,6 @@ void HumanControlPanel::removeHuman(int _index)
   this->activeHumanChanged();
   this->activeViewIndexChanged();
   this->activeFollowModeChanged();
-  this->activeLockedPoseChanged();
 
   // Nobody left to follow: the camera would otherwise stay locked onto the
   // last human's final position, leaving the operator staring at an empty

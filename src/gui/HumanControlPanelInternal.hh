@@ -16,8 +16,6 @@
 #include <cmath>
 #include <string>
 
-#include <QGuiApplication>
-#include <QKeyEvent>
 #include <QString>
 
 namespace gz_human_sim
@@ -208,22 +206,25 @@ inline bool IsPoseCapableIndex(int _index)
   return _index == 0;
 }
 
-// Poses that can be held down on a key, mirroring ActorCommandPlugin's own
-// kPoseClips table (the `pose` strings here are exactly what it matches on).
+// roster（PublishRoster()）が「この人物が出してよい速度」として広告する値。
+// 実際に速度指令を出すのは unified_entity_control 側で、その上限として
+// これを読む。かつてこのパネル自身のテレオペ速度だったもの。
+inline constexpr double kAdvertisedMaxLinear = 1.0;
+inline constexpr double kAdvertisedMaxAngular = 2.5;
+
+// 名前付きポーズの表示名。ActorCommandPlugin の kPoseClips と対になる
+// （`pose` の文字列はあちらが照合するものと同じ）。
 //
-// This is the one place a new pose gets wired to the keyboard: add a row
-// here, a row in the plugin's kPoseClips, and the <animation> entries in the
-// model SDF. Everything else -- the held-pose property, the L-key
-// registration, the status lines, the QML button -- is written against the
-// table rather than against "sit", so none of it needs touching.
+// ポーズを操作する手段はこのパッケージから外へ出た（構想書 §11）ので、
+// ここに残っているのは「サーバーが state で返してきたポーズ名を、画面に
+// 出す日本語へ直す」ためだけ。キー割当は持たない。
 struct PoseShortcut
 {
-  int key;              // Qt::Key_*
-  const char *pose;     // published to the actor's pose_topic
-  const char *label;    // shown in the panel/status line
+  const char *pose;     // actor の pose_topic に流れる名前
+  const char *label;    // パネルの表示名
 };
 inline const PoseShortcut kPoseShortcuts[] = {
-  {Qt::Key_K, "sit", "着席"},
+  {"sit", "着席"},
 };
 inline constexpr int kPoseShortcutCount =
     static_cast<int>(sizeof(kPoseShortcuts) / sizeof(kPoseShortcuts[0]));
@@ -231,104 +232,6 @@ inline constexpr int kPoseShortcutCount =
 // Label shown for "no pose held" -- i.e. the actor's ordinary standing/
 // walking behaviour, which the L key can register just like any other pose.
 inline const char *const kNoPoseLabel = "立ち";
-
-inline const PoseShortcut *PoseShortcutForKey(int _key)
-{
-  for (int i = 0; i < kPoseShortcutCount; ++i)
-  {
-    if (kPoseShortcuts[i].key == _key)
-      return &kPoseShortcuts[i];
-  }
-  return nullptr;
-}
-
-// Movement layout (Q W E / A _ D / Z X C, center vacated -- S and N are
-// held modifier / stop keys now, not directions), shared by the on-screen
-// pad and the keyboard shortcuts in eventFilter(). Diagonal components are
-// scaled by 1/sqrt(2) so diagonal moves aren't faster than straight ones.
-// X is the odd one out: rather than a pure backward strafe (which would
-// moonwalk the actor away without it ever turning around), it combines
-// backward motion with a turn rate so the actor visibly spins to face the
-// direction it's retreating toward -- but only when _turnToFace is
-// requested (S held); a plain key press is always a pure strafe, including
-// X (straight-back strafe, i.e. moonwalking), same as the other 7
-// directions.
-inline constexpr double kTeleopSpeed = 1.0;
-inline constexpr double kTeleopDiagonal = kTeleopSpeed * 0.70710678;
-inline constexpr double kTeleopTurnRate = 2.5;
-
-// Jump height (meters) range the QML slider / setJumpHeight() clamp to.
-inline constexpr double kJumpHeightMin = 0.05;
-inline constexpr double kJumpHeightMax = 1.5;
-
-// Baseline speed-multiplier range setSpeedMultiplier() (the QML slider)
-// clamps to.
-inline constexpr double kSpeedMultiplierMin = 0.1;
-inline constexpr double kSpeedMultiplierMax = 4.0;
-
-// Extra factor EffectiveSpeedMultiplier() applies on top of the baseline
-// speedMultiplierState while Ctrl (slow walk) or Shift (run) is held --
-// see eventFilter()'s Key_Control/Key_Shift tracking and teleopDirection()/
-// ApplyHeldDirectionKeys(), which are the only two places that call it.
-inline constexpr double kSlowFactor = 0.5;
-inline constexpr double kRunFactor = 2.0;
-
-// Every entry's (linear, lateral) magnitude is kTeleopSpeed by construction
-// (cardinal directions put it all on one axis; diagonals split it
-// kTeleopDiagonal/kTeleopDiagonal, which is kTeleopSpeed/sqrt(2) per axis,
-// i.e. kTeleopSpeed once recombined) -- teleopDirection()'s _turnToFace
-// path relies on that to reuse this table for "how far to turn, then walk
-// forward at this same speed" instead of a separate direction-angle table.
-inline bool DirectionToTwist(
-    const std::string &_direction, double &_linear, double &_lateral,
-    double &_angular)
-{
-  _linear = 0.0;
-  _lateral = 0.0;
-  _angular = 0.0;
-  if (_direction == "W") { _linear = kTeleopSpeed; }
-  else if (_direction == "A") { _lateral = kTeleopSpeed; }
-  else if (_direction == "D") { _lateral = -kTeleopSpeed; }
-  else if (_direction == "X") { _linear = -kTeleopSpeed; }
-  else if (_direction == "Q") { _linear = kTeleopDiagonal; _lateral = kTeleopDiagonal; }
-  else if (_direction == "E") { _linear = kTeleopDiagonal; _lateral = -kTeleopDiagonal; }
-  else if (_direction == "Z") { _linear = -kTeleopDiagonal; _lateral = kTeleopDiagonal; }
-  else if (_direction == "C") { _linear = -kTeleopDiagonal; _lateral = -kTeleopDiagonal; }
-  else { return false; }
-  return true;
-}
-
-// The 4 cardinal keys eligible for steering-combo tracking (see
-// PressDirectionKey()/ApplyHeldDirectionKeys()). Diagonals (Q/E/Z/C) stay
-// on the old single-shot immediate path.
-inline bool IsSteerableDirection(const std::string &_direction)
-{
-  return _direction == "W" || _direction == "A" ||
-      _direction == "D" || _direction == "X";
-}
-
-// atan2(lateral, linear) for a direction's DirectionToTwist() vector --
-// same convention teleopDirection()'s turnToFace path already uses for
-// headingOffset, reused here so the turn direction sign logic in
-// ApplyHeldDirectionKeys() matches it exactly.
-inline double DirectionHeadingAngle(const std::string &_direction)
-{
-  double linear = 0.0, lateral = 0.0, angular = 0.0;
-  DirectionToTwist(_direction, linear, lateral, angular);
-  return std::atan2(lateral, linear);
-}
-
-// Keyboard shortcuts only fire when focus isn't on a text-editable QML item
-// (name field, x/y/z/yaw fields, ...) -- otherwise typing "human1" into the
-// name box would also drive the active human around.
-inline bool IsTextEditFocused()
-{
-  auto *focusObject = qGuiApp ? qGuiApp->focusObject() : nullptr;
-  if (!focusObject)
-    return false;
-  const QString className = focusObject->metaObject()->className();
-  return className.contains("TextInput") || className.contains("TextEdit");
-}
 
 // Keep in sync with setViewpoint()'s switch below and the QML ComboBox.
 enum ViewIndex

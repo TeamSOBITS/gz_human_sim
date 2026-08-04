@@ -40,11 +40,6 @@
 #include <gz/rendering/Scene.hh>
 #include <gz/rendering/Visual.hh>
 
-// DualSense/gamepad polling only -- SDL_INIT_GAMECONTROLLER (never
-// SDL_INIT_VIDEO), so this never touches windowing/GL and cannot conflict
-// with the already-running Ogre2/Qt scene. See PollDualsense(). Mirrors
-// guide_robot's GuiderRobotManager, which this mode is modeled on.
-#include <SDL2/SDL.h>
 
 #include "HumanControlPanelInternal.hh"
 
@@ -123,8 +118,8 @@ void HumanControlPanel::PublishRoster()
     // entry would make the pad drive at whatever it was two seconds ago.
     message.add_data(
         "human||" + human.name + "|/" + human.name + "/cmd_vel|1|1.000000|" +
-        std::to_string(kTeleopSpeed) + "|" +
-        std::to_string(kTeleopTurnRate) + "|" + poseChannel + "|" +
+        std::to_string(kAdvertisedMaxLinear) + "|" +
+        std::to_string(kAdvertisedMaxAngular) + "|" + poseChannel + "|" +
         poses[0] + "|" + poses[1] + "|" + poses[2] + "|" + poses[3] +
         "|" + human.name + "（人物）");
   }
@@ -134,7 +129,6 @@ void HumanControlPanel::PublishRoster()
 
 HumanControlPanel::~HumanControlPanel()
 {
-  this->CloseDualsenseController();
   for (auto &human : this->humans)
     this->TerminateProcessGroup(human.process);
 }
@@ -338,38 +332,11 @@ int HumanControlPanel::ActiveHumanIndex() const
   return this->activeHumanIndex;
 }
 
-bool HumanControlPanel::ShiftHeld() const
-{
-  return this->shiftHeldState;
-}
 
-bool HumanControlPanel::CtrlHeld() const
-{
-  return this->ctrlHeldState;
-}
 
-bool HumanControlPanel::SHeld() const
-{
-  return this->sHeldState;
-}
 
-bool HumanControlPanel::JHeld() const
-{
-  return this->jHeldState;
-}
 
-QString HumanControlPanel::HeldPose() const
-{
-  return QString::fromStdString(this->heldPoseState);
-}
 
-QString HumanControlPanel::ActiveLockedPose() const
-{
-  if (this->activeHumanIndex < 0 ||
-      this->activeHumanIndex >= static_cast<int>(this->humans.size()))
-    return {};
-  return QString::fromStdString(this->humans.at(this->activeHumanIndex).lockedPose);
-}
 
 QString HumanControlPanel::poseLabel(const QString &_pose) const
 {
@@ -382,33 +349,9 @@ QString HumanControlPanel::poseLabel(const QString &_pose) const
   return kNoPoseLabel;
 }
 
-double HumanControlPanel::JumpHeight() const
-{
-  return this->jumpHeightState;
-}
 
-double HumanControlPanel::SpeedMultiplier() const
-{
-  return this->speedMultiplierState;
-}
 
-void HumanControlPanel::setJumpHeight(double _height)
-{
-  const double clamped = std::clamp(_height, kJumpHeightMin, kJumpHeightMax);
-  if (std::abs(clamped - this->jumpHeightState) < 1e-9)
-    return;
-  this->jumpHeightState = clamped;
-  this->jumpHeightChanged();
-}
 
-void HumanControlPanel::setSpeedMultiplier(double _value)
-{
-  const double clamped = std::clamp(_value, kSpeedMultiplierMin, kSpeedMultiplierMax);
-  if (std::abs(clamped - this->speedMultiplierState) < 1e-9)
-    return;
-  this->speedMultiplierState = clamped;
-  this->speedMultiplierChanged();
-}
 
 int HumanControlPanel::ActiveViewIndex() const
 {
@@ -484,16 +427,12 @@ void HumanControlPanel::setActiveHuman(int _index)
     return;
   if (this->activeHumanIndex == _index)
     return;
-  const int previousIndex = this->activeHumanIndex;
   this->activeHumanIndex = _index;
   this->activeHumanChanged();
   this->activeFollowModeChanged();
-  this->activeLockedPoseChanged();
-  // A held pose key only steers the active human (see EffectivePose()), so
-  // handing "対象" over has to republish for both sides: the human losing it
-  // stops holding the key's pose, the one gaining it starts.
-  this->UpdatePoseIntent(previousIndex);
-  this->UpdatePoseIntent(_index);
+  // 姿勢は「対象」の付け替えで republish していたが、姿勢を含む操作は
+  // このパッケージから外へ出た（構想書 §11）。いまはサーバーが状態を
+  // publish し、このパネルはそれを表示するだけ。
   // Same auto-focus as a fresh spawn (see PollSpawnConfirmation): jump the
   // camera to a behind/chase view of whichever human just became "対象".
   // This also updates the human's stored viewIndex/viewDistance and fires
