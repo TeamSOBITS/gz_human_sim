@@ -1,1 +1,16 @@
-<!DOCTYPE RCC><RCC version="1.0"><qresource prefix="/HumanControlPanel"><file>HumanControlPanel.qml</file></qresource></RCC>
+<!DOCTYPE RCC><RCC version="1.0">
+  <!-- prefix はプラグイン名と一致させること。gz-gui は
+       :/<プラグイン名>/<プラグイン名>.qml を探す。
+       セクションは qml/ サブディレクトリに置き、qmldir で型を宣言する。
+       同一ディレクトリの暗黙解決は gz-gui のロード経路では効かない。 -->
+  <qresource prefix="/HumanControlPanel">
+    <file>HumanControlPanel.qml</file>
+    <file alias="qml/qmldir">qml/qmldir</file>
+    <file alias="qml/SpawnSection.qml">qml/SpawnSection.qml</file>
+    <file alias="qml/MarkerSection.qml">qml/MarkerSection.qml</file>
+    <file alias="qml/ViewpointSection.qml">qml/ViewpointSection.qml</file>
+    <file alias="qml/FollowModeSection.qml">qml/FollowModeSection.qml</file>
+    <file alias="qml/CollisionSection.qml">qml/CollisionSection.qml</file>
+    <file alias="qml/RouteSection.qml">qml/RouteSection.qml</file>
+  </qresource>
+</RCC>
