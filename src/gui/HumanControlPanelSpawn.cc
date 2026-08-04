@@ -445,11 +445,12 @@ void HumanControlPanel::ProbeSafeSpawnPosition(
   }
   else
   {
-    std::lock_guard<std::mutex> lock(this->cameraPosMutex);
-    if (this->cameraPosValid)
+    double camX = 0.0;
+    double camY = 0.0;
+    if (this->cameraController.GroundPosition(camX, camY))
     {
-      const double toPointX = candidateX - this->cameraX;
-      const double toPointY = candidateY - this->cameraY;
+      const double toPointX = candidateX - camX;
+      const double toPointY = candidateY - camY;
       const double length = std::hypot(toPointX, toPointY);
       if (length > 1e-3)
       {

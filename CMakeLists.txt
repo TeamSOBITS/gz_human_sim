@@ -81,6 +81,7 @@ target_link_libraries(gz_human_nav_grid_system
 # for the tables and constants they share), rather than the single
 # ~3700-line file this used to be.
 add_library(HumanControlPanel SHARED
+  src/gui/CameraController.cc
   src/gui/HumanControlPanel.cc
   src/gui/HumanControlPanelCamera.cc
   src/gui/HumanControlPanelCollision.cc
@@ -89,6 +90,7 @@ add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanelRoute.cc
   src/gui/HumanControlPanelSpawn.cc
   src/gui/HumanControlPanelState.cc
+  src/gui/CameraController.hh
   src/gui/HumanControlPanel.hh
   src/gui/HumanRegistry.hh
   src/gui/HumanControlPanelInternal.hh

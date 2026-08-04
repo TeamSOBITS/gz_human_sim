@@ -73,7 +73,7 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
 {
   if (_event->type() == gz::gui::events::Render::kType)
   {
-    this->ApplyViewpoint();
+    this->cameraController.ApplyPending();
     this->ApplyCollisionVisibility();
     this->ApplySpawnMarkers();
   }

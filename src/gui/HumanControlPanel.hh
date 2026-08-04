@@ -26,6 +26,7 @@
 
 // サーバー側と共有する状態の定義（構想書 §3）。
 #include "gz_human_sim/CharacterState.hh"
+#include "CameraController.hh"
 #include "HumanRegistry.hh"
 
 namespace gz_human_sim
@@ -467,7 +468,7 @@ class HumanControlPanel : public gz::gui::Plugin
   /// \brief Release any follow/track target and put the camera back at the
   /// pose it had when the world first loaded (MinimalScene's own
   /// <camera_pose> from gui.config), i.e. the initial full-scene overview.
-  /// A no-op until ApplyViewpoint() has captured that starting pose at
+  /// A no-op until CameraController has captured that starting pose at
   /// least once.
   public: Q_INVOKABLE void resetToInitialView();
 
@@ -477,35 +478,6 @@ class HumanControlPanel : public gz::gui::Plugin
   /// the render thread (the only thread allowed to touch the Ogre2 scene).
   protected: bool eventFilter(QObject *_obj, QEvent *_event) override;
 
-
-  /// \brief Pending camera command, written on the Qt thread by
-  /// setViewpoint() and consumed on the render thread by ApplyViewpoint().
-  /// `engage` false means "release the camera back to free view".
-  private: struct ViewCommand
-  {
-    bool pending{false};
-    bool engage{false};
-    std::string target;
-    gz::math::Vector3d followOffset{0.0, 0.0, 0.0};
-    gz::math::Vector3d trackOffset{0.0, 0.0, 0.6};
-    // True (the default, set for every view except kViewFirstPerson) means
-    // followOffset/trackOffset are fixed WORLD-frame vectors, so the
-    // camera's position/look-at direction don't rotate when the human's
-    // body turns -- only the human's own position (which the offsets are
-    // still added to every frame) moves the camera, keeping the
-    // background visually stable while the body turns in place (a chase
-    // view that rotated with the body would swing the whole background
-    // around on every turn, which reads as disorienting rather than as a
-    // 3D-game-style chase camera). kViewFirstPerson sets this false
-    // instead, since a head/eye view SHOULD turn with the body.
-    bool worldFrame{true};
-    QString label;
-    int retries{0};
-    // Only meaningful together with engage=false: also snap the camera
-    // back to initialCameraPose instead of just releasing follow/track
-    // and leaving it wherever it drifted to (see resetToInitialView()).
-    bool resetPose{false};
-  };
 
   private: void DiscoverWorld();
   private: void SetStatus(const QString &_status);
@@ -622,15 +594,12 @@ class HumanControlPanel : public gz::gui::Plugin
   /// for a nonexistent entity).
   private: void PollRemovalConfirmation(QString _name, int _attempt);
 
-  /// \brief Render-thread only: apply the pending ViewCommand to the GUI
-  /// user camera (retrying while the target model is still spawning).
-  private: void ApplyViewpoint();
 
   /// \brief Render-thread only, called from the same eventFilter() Render
-  /// branch as ApplyViewpoint(): pushes each actor-backed human's
+  /// branch as CameraController::ApplyPending(): pushes each actor-backed human's
   /// Human::showCollision to its collision-body capsule in the render
   /// scene, retrying while the companion model is still spawning (same
-  /// idea as ApplyViewpoint()'s target search). Does nothing on a human
+  /// idea as CameraController's target search). Does nothing on a human
   /// whose state is already applied, so the per-frame cost is a couple of
   /// int comparisons in the steady state.
   ///
@@ -703,15 +672,10 @@ class HumanControlPanel : public gz::gui::Plugin
   private: int activeHumanIndex{-1};
 
 
-  private: gz::rendering::CameraPtr userCamera;
-  private: std::mutex viewMutex;
-  private: ViewCommand viewCommand;
-  private: std::string viewpointTarget;
-  // Captured once, the first time ApplyViewpoint() finds the user camera
-  // (i.e. still at whatever gui.config's MinimalScene <camera_pose>
-  // placed it at) -- see resetToInitialView().
-  private: gz::math::Pose3d initialCameraPose;
-  private: bool initialCameraPoseCaptured{false};
+  /// \brief GUI カメラの視点制御。人物のことは何も知らないクラスなので、
+  /// 「何番の人物か」の解決は HumanControlPanelCamera.cc 側で行う。
+  /// 将来 guide_robot と共通の GUI 基盤パッケージへ出す予定（構想書 §12）。
+  private: CameraController cameraController;
 
   private: struct CachedPose
   {
@@ -819,7 +783,7 @@ class HumanControlPanel : public gz::gui::Plugin
   private: std::vector<int> RouteTargetIndices() const;
 
   /// \brief Render-thread only, called from the same eventFilter() Render
-  /// branch as ApplyViewpoint(): creates each human's spawn-marker visual
+  /// branch as CameraController::ApplyPending(): creates each human's spawn-marker visual
   /// on first sight and pushes its desired visibility, plus a marker for
   /// each not-yet-spawned picked spawn point. Purely render-scene objects
   /// (Visual + Material, no ECM entity), so they can never collide with
@@ -837,11 +801,6 @@ class HumanControlPanel : public gz::gui::Plugin
       const gz::rendering::ScenePtr &_scene, const std::string &_name,
       double _x, double _y, double _z, int _colorIndex, bool _pending) const;
 
-  /// \brief Finds (and caches) the GUI user camera in _scene. Render thread
-  /// only. Split out of ApplyViewpoint() so the per-frame camera-position
-  /// cache below can be kept up to date even when no viewpoint command is
-  /// pending.
-  private: bool EnsureUserCamera(const gz::rendering::ScenePtr &_scene);
 
   private: gz::transport::Node::Publisher sfmRegisterPublisher;
   private: gz::transport::Node::Publisher sfmUnregisterPublisher;
@@ -897,16 +856,6 @@ class HumanControlPanel : public gz::gui::Plugin
   private: std::mutex markerMutex;
   private: std::vector<std::string> markerRemovalQueue;
 
-  /// \brief Last known GUI camera XY, refreshed every Render event. The
-  /// spawn-safety probe walks in from the camera's side (see
-  /// ProbeSafeSpawnPosition()): the operator clicked that point, so the
-  /// line of sight to it is by definition unobstructed, which makes it the
-  /// one approach direction guaranteed not to be blocked by the very
-  /// furniture the probe is trying to test around.
-  private: std::mutex cameraPosMutex;
-  private: double cameraX{0.0};
-  private: double cameraY{0.0};
-  private: bool cameraPosValid{false};
 
 
 

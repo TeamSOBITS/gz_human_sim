@@ -233,24 +233,6 @@ inline constexpr int kPoseShortcutCount =
 // walking behaviour, which the L key can register just like any other pose.
 inline const char *const kNoPoseLabel = "立ち";
 
-// Keep in sync with setViewpoint()'s switch below and the QML ComboBox.
-enum ViewIndex
-{
-  kViewFree = 0,
-  kViewFirstPerson,
-  kViewBehind,
-  kViewFront,
-  kViewRight,
-  kViewLeft,
-  kViewTop,
-  kViewFrontRightUp,
-  kViewFrontLeftUp,
-  kViewCount,
-};
-inline const char *const kViewpointLabels[kViewCount] = {
-  "自由視点", "一人称（本人視点）", "後方追従", "前方から", "右横から", "左横から",
-  "俯瞰（真上）", "右奥上から（斜め上）", "左奥上から（斜め上）",
-};
 // ABSOLUTE eye height above the ground for kViewFirstPerson (roughly
 // standing human eye level), unlike guide_robot's robots, so this differs
 // from GuiderRobotManager::setViewpoint()'s equivalent value.
@@ -274,17 +256,6 @@ inline constexpr double kEyeHeight = 1.6;
 // or implausibly small), the first-person camera should still sit a
 // sensible distance above whatever entity Z it's following.
 inline constexpr double kMinEyeOffset = 0.2;
-
-// How eagerly the chase camera (SetFollowTarget/SetTrackTarget's pgain)
-// catches up to the human's current world position each frame. The
-// background-swings-when-the-body-turns problem this used to be tuned for
-// is now fixed properly via ViewCommand::worldFrame instead (see the .hh
-// and ApplyViewpoint()) -- the human's own rotation no longer moves the
-// camera at all, so this only smooths the camera's translation as the
-// human actually walks somewhere. Kept a bit below the original 0.35 for
-// a gentle trailing feel without being sluggish to snap onto a
-// freshly-selected human.
-inline constexpr double kChasePGain = 0.25;
 
 // dladdr anchor: resolves to the shared library this code was loaded
 // from, so LoadConfig() can find human_pose_presets.yaml under this
