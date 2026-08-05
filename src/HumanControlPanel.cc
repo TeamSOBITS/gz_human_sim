@@ -1,5 +1,8 @@
 #include "HumanControlPanel.hh"
 
+#include "GuiderDeleteRecoverEvent.hh"
+#include "GuiderViewpointRequestEvent.hh"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -471,8 +474,25 @@ void HumanControlPanel::PublishRoster()
       }
     }
 
+    // Same fallback shape as guide_robot's GuiderRobotManager::
+    // PublishRoster() -- there is no static spawn-pose fallback for
+    // humans (Human carries no x/y/z of its own, only the live poses
+    // cache does), so an entity heard from zero times publishes (0,0,0).
+    double x = 0.0, y = 0.0, z = 0.0, yaw = 0.0;
+    {
+      std::lock_guard<std::mutex> lock(this->poseMutex);
+      const auto found = this->poses.find(human.name);
+      if (found != this->poses.end() && found->second.valid)
+      {
+        x = found->second.x;
+        y = found->second.y;
+        z = found->second.z;
+        yaw = found->second.yaw;
+      }
+    }
+
     // kind|type|name|cmdVelTopic|holonomic|yawSign|maxLinear|maxAngular
-    //   |poseChannel|pose1|pose2|pose3|pose4|label
+    //   |poseChannel|pose1|pose2|pose3|pose4|x|y|z|yaw|label
     // `type` is empty for humans: it keys guide_robot's joint table, which
     // only covers robot arms.
     // -- format owned by guide_robot's src/GuiderTargetRoster.hh; see the
@@ -485,8 +505,10 @@ void HumanControlPanel::PublishRoster()
         "human||" + human.name + "|/" + human.name + "/cmd_vel|1|1.000000|" +
         std::to_string(kTeleopSpeed) + "|" +
         std::to_string(kTeleopTurnRate) + "|" + poseChannel + "|" +
-        poses[0] + "|" + poses[1] + "|" + poses[2] + "|" + poses[3] +
-        "|" + human.name + "（人物）");
+        poses[0] + "|" + poses[1] + "|" + poses[2] + "|" + poses[3] + "|" +
+        std::to_string(x) + "|" + std::to_string(y) + "|" +
+        std::to_string(z) + "|" + std::to_string(yaw) + "|" +
+        human.name + "（人物）");
   }
 
   this->rosterPublisher.Publish(message);
@@ -594,6 +616,69 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
     this->ApplyCollisionVisibility();
     this->ApplySpawnMarkers();
     this->PollDualsense();
+  }
+  else if (_event->type() == guider::events::ViewpointRequest::kType)
+  {
+    // guide_robot's GuiderPadController (OPTIONS wheel, → 視点). Only
+    // "human"-kind requests are ours; GuiderRobotManager's own
+    // eventFilter() picks up the "robot" ones from the same broadcast.
+    auto *request =
+        static_cast<guider::events::ViewpointRequest *>(_event);
+    if (request->Kind() == "human")
+    {
+      const std::string name = request->TargetName().toStdString();
+      int index = -1;
+      for (std::size_t i = 0; i < this->humans.size(); ++i)
+      {
+        if (this->humans[i].name == name)
+        {
+          index = static_cast<int>(i);
+          break;
+        }
+      }
+      if (index >= 0)
+        this->setViewpoint(index, request->ViewIndex(), 2.0);
+    }
+  }
+  else if (_event->type() == guider::events::DeleteRecoverRequest::kType)
+  {
+    // OPTIONS wheel's ↙ 削除・復帰. Only "human"-kind requests are ours.
+    auto *request =
+        static_cast<guider::events::DeleteRecoverRequest *>(_event);
+    if (request->Kind() == "human")
+    {
+      const std::string name = request->TargetName().toStdString();
+      int index = -1;
+      for (std::size_t i = 0; i < this->humans.size(); ++i)
+      {
+        if (this->humans[i].name == name)
+        {
+          index = static_cast<int>(i);
+          break;
+        }
+      }
+      if (index < 0)
+      {
+        // Nothing to log through: name may already be gone (the pad's
+        // roster snapshot is up to 2s stale). Silent no-op, same as
+        // every other index-miss in this file.
+      }
+      else if (request->Recover())
+      {
+        // Confirmed no fall-recovery mechanism exists for humans at all
+        // (actors are kinematic, not rigid-body-tumbling -- there is
+        // nothing to stand back up). Said out loud rather than silently
+        // ignored, so a stray "復帰" on a human reads as "not supported"
+        // instead of as a bug in the pad.
+        this->SetStatus(
+            QString::fromStdString(this->humans.at(index).name) +
+            "：人物には「復帰」がありません（転倒しないため）");
+      }
+      else
+      {
+        this->removeHuman(index);
+      }
+    }
   }
   else if (_event->type() == gz::gui::events::LeftClickToScene::kType)
   {
