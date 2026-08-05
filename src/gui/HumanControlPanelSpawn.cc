@@ -545,6 +545,8 @@ void HumanControlPanel::PollSpawnConfirmation(
         this->node.Advertise<gz::msgs::Empty>(removeTopic);
     human.followModePublisher =
         this->node.Advertise<gz::msgs::StringMsg>(followModeTopic);
+    human.jumpPublisher =
+        this->node.Advertise<gz::msgs::Double>(jumpTopic);
     const std::string followModeStd = _followMode.isEmpty()
         ? "auto" : _followMode.toStdString();
     const auto followModeIt = std::find(

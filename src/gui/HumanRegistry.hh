@@ -73,6 +73,14 @@ struct Human
   // holds that pose on its own, with no key held down, until it's
   // unregistered -- see UpdatePoseIntent()/togglePoseLock() in the .cc.
   gz::transport::Node::Publisher posePublisher;
+  /// \brief L キー / 「現在の姿勢を登録」で登録された姿勢。
+  ///
+  /// 非空なら、キーを離してもこの人物はその姿勢を保ち続ける。空文字を
+  /// 登録することにも意味がある（直立で固定され、K を押しても座らない）。
+  /// 優先順位は EffectivePose() 参照。
+  std::string lockedPose;
+  /// \brief ジャンプ指令（cmd_jump）。アクター由来の人物のみ。
+  gz::transport::Node::Publisher jumpPublisher;
   /// rief 視点。担当は HumanControlPanelCamera.cc。
   ///
   /// 「対象」を切り替えたとき、視点コンボがその人物の実際の設定を表示できる

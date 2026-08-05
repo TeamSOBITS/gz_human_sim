@@ -1,1 +1,5 @@
 launch/__pycache__/
+
+# 比較用に置いた remote の develop/collision のチェックアウト。
+# コミットしない。
+gz_human_sim_old/

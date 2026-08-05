@@ -16,6 +16,7 @@
 #include <cmath>
 #include <string>
 
+#include <QGuiApplication>
 #include <QString>
 
 namespace gz_human_sim
@@ -148,19 +149,49 @@ inline constexpr double kAdvertisedMaxAngular = 2.5;
 // 名前付きポーズの表示名。ActorCommandPlugin の kPoseClips と対になる
 // （`pose` の文字列はあちらが照合するものと同じ）。
 //
-// ポーズを操作する手段はこのパッケージから外へ出た（構想書 §11）ので、
-// ここに残っているのは「サーバーが state で返してきたポーズ名を、画面に
-// 出す日本語へ直す」ためだけ。キー割当は持たない。
+// 押している間だけその姿勢になる（K = 着席）。離すと立つ。ただし L で
+// 「登録」された姿勢がある人物では、登録側が勝つ（EffectivePose() 参照）。
 struct PoseShortcut
 {
+  int key;              // Qt::Key_*
   const char *pose;     // actor の pose_topic に流れる名前
   const char *label;    // パネルの表示名
 };
 inline const PoseShortcut kPoseShortcuts[] = {
-  {"sit", "着席"},
+  {Qt::Key_K, "sit", "着席"},
 };
 inline constexpr int kPoseShortcutCount =
     static_cast<int>(sizeof(kPoseShortcuts) / sizeof(kPoseShortcuts[0]));
+
+inline const PoseShortcut *PoseShortcutForKey(int _key)
+{
+  for (int i = 0; i < kPoseShortcutCount; ++i)
+  {
+    if (kPoseShortcuts[i].key == _key)
+      return &kPoseShortcuts[i];
+  }
+  return nullptr;
+}
+
+/// \brief 名前欄などに入力中かどうか。
+///
+/// **これを外すと、名前欄に "human1" と打つだけで人物が走り出す。**
+/// 方向キーの処理に入る前に必ず確認すること。
+inline bool IsTextEditFocused()
+{
+  auto *focusObject = qGuiApp ? qGuiApp->focusObject() : nullptr;
+  if (!focusObject)
+    return false;
+  const QString className = focusObject->metaObject()->className();
+  return className.contains("TextInput") || className.contains("TextEdit");
+}
+
+/// \brief 押しっぱなしで舵を切れる方向（斜めは単発）。
+inline bool IsSteerableDirection(const std::string &_direction)
+{
+  return _direction == "W" || _direction == "A" ||
+      _direction == "D" || _direction == "X";
+}
 
 // Label shown for "no pose held" -- i.e. the actor's ordinary standing/
 // walking behaviour, which the L key can register just like any other pose.

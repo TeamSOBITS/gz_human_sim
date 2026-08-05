@@ -9,8 +9,12 @@
     <file alias="qml/SpawnSection.qml">qml/SpawnSection.qml</file>
     <file alias="qml/MarkerSection.qml">qml/MarkerSection.qml</file>
     <file alias="qml/ViewpointSection.qml">qml/ViewpointSection.qml</file>
+    <file alias="qml/MoveParamsSection.qml">qml/MoveParamsSection.qml</file>
+    <file alias="qml/DualsenseSection.qml">qml/DualsenseSection.qml</file>
     <file alias="qml/FollowModeSection.qml">qml/FollowModeSection.qml</file>
+    <file alias="qml/PoseSection.qml">qml/PoseSection.qml</file>
     <file alias="qml/CollisionSection.qml">qml/CollisionSection.qml</file>
     <file alias="qml/RouteSection.qml">qml/RouteSection.qml</file>
+    <file alias="qml/HelpSection.qml">qml/HelpSection.qml</file>
   </qresource>
 </RCC>

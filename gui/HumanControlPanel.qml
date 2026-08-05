@@ -16,7 +16,9 @@ Rectangle {
   // lot since 560 was first picked here (follow-mode combos, path
   // templates, the viewpoint block, ...) and previously just kept getting
   // squeezed -- the fixed-height stuff would silently eat the spawned-
-  // humans ListView's space (Layout.fillHeight: true) down to a sliver. Now everything below lives inside a ScrollView
+  // humans ListView's space (Layout.fillHeight: true) down to a sliver,
+  // taking the per-row 削除/teleop pad with it even though they were still
+  // there in the tree. Now everything below lives inside a ScrollView
   // instead, so this only needs to be a *reasonable starting* height, not
   // a tally of every field added since -- anything that doesn't fit just
   // scrolls.
@@ -25,10 +27,6 @@ Rectangle {
   anchors.fill: parent
   color: "#eef4f2"
 
-  property int selectedModelIndex: 0
-  property int selectedPoseIndex: 0
-  property int selectedFollowModeIndex: 0
-  property int selectedPathTemplateIndex: 0
 
   ScrollView {
     anchors.fill: parent
@@ -74,36 +72,16 @@ Rectangle {
       }
     }
 
-    // 選択中の人物がいま何をしているか。
-    //
-    // これはパネルが指令から推測した値ではなく、サーバー
-    // （ActorCommandPlugin）が state トピックへ流してくる値です
-    // （構想書 §3）。テレオペ以外の理由で人物が動いたとき -- 経路追従、
-    // 将来の NPC や着席 -- も、ここには正しい状態が出ます。
-    Rectangle {
-      Layout.fillWidth: true
-      height: 28
-      radius: 6
-      color: "#eef2f1"
-      visible: HumanControlPanel.activeHumanIndex >= 0
-      Label {
-        anchors.fill: parent
-        anchors.leftMargin: 10
-        anchors.rightMargin: 10
-        text: "状態: " + HumanControlPanel.activeCharacterState
-        color: "#3d5450"
-        elide: Text.ElideRight
-        verticalAlignment: Text.AlignVCenter
-        horizontalAlignment: Text.AlignHCenter
-      }
-    }
-
     SpawnSection { Layout.fillWidth: true }
     MarkerSection { Layout.fillWidth: true }
     ViewpointSection { Layout.fillWidth: true }
+    MoveParamsSection { Layout.fillWidth: true }
+    DualsenseSection { Layout.fillWidth: true }
     FollowModeSection { Layout.fillWidth: true }
+    PoseSection { Layout.fillWidth: true }
     CollisionSection { Layout.fillWidth: true }
     RouteSection { Layout.fillWidth: true }
+    HelpSection { Layout.fillWidth: true }
     }
   }
 }

@@ -1,10 +1,13 @@
-# セクション QML を型として使えるようにする。
-#
-# qrc 内の同一ディレクトリなら暗黙に解決されるはずだが、gz-gui のロード経路
-# では解決されず「SpawnSection is not a type」になる。qmldir で明示する。
-SpawnSection      1.0 SpawnSection.qml
-MarkerSection     1.0 MarkerSection.qml
-ViewpointSection  1.0 ViewpointSection.qml
+# gz-gui はこの QML をリソース上の位置を基準 URL にせずに読み込むため、
+# 親からは絶対 qrc URL で import する必要がある。この qmldir はそのときの
+# 型宣言。ファイルを増やしたらここにも足すこと。
+SpawnSection 1.0 SpawnSection.qml
+MarkerSection 1.0 MarkerSection.qml
+ViewpointSection 1.0 ViewpointSection.qml
+MoveParamsSection 1.0 MoveParamsSection.qml
+DualsenseSection 1.0 DualsenseSection.qml
 FollowModeSection 1.0 FollowModeSection.qml
-CollisionSection  1.0 CollisionSection.qml
-RouteSection      1.0 RouteSection.qml
+PoseSection 1.0 PoseSection.qml
+CollisionSection 1.0 CollisionSection.qml
+RouteSection 1.0 RouteSection.qml
+HelpSection 1.0 HelpSection.qml

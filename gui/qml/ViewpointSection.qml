@@ -1,9 +1,15 @@
 /*
  * ViewpointSection -- カメラ視点の選択と距離。
  *
- * HumanControlPanel.qml から切り出したもの（構想書 §13）。中身は変えていない。
- * 親の ColumnLayout の子として並んでいた要素をそのまま包んだので、
- * ルートは ColumnLayout のまま。Layout.fillWidth を親から引き継ぐ。
+ * HumanControlPanel.qml から切り出したもの（構想書 §13）。**中身は
+ * gz_human_sim_old と同一。** 変えたのは以下の 2 点だけ:
+ *
+ *   - 親の ColumnLayout の子として並んでいた要素を ColumnLayout で包んだ
+ *   - `id: root` とこのセクションが使うプロパティをここに置いた
+ *
+ * 2 点目は必須。**QML の id とプロパティはファイル単位のスコープ**なので、
+ * 分割元ファイルの `root` やプロパティはここからは見えない。付け忘れると
+ * バインディングが静かに切れる（実際に一度やった）。
  *
  * ロジックはここに書かないこと。C++ 側（HumanControlPanel）の
  * Q_PROPERTY / Q_INVOKABLE を呼ぶだけにする。
@@ -13,6 +19,7 @@ import QtQuick.Controls 2.2
 import QtQuick.Layouts 1.3
 
 ColumnLayout {
+  id: root
   Layout.fillWidth: true
   spacing: 10
 
@@ -85,5 +92,4 @@ ColumnLayout {
       viewDistanceField.text = HumanControlPanel.activeViewDistance.toFixed(2)
     }
   }
-
 }

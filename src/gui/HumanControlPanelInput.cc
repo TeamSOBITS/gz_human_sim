@@ -118,6 +118,139 @@ bool HumanControlPanel::eventFilter(QObject *_obj, QEvent *_event)
     // in the viewport (selection, camera work) alone -- see the
     // routeRecording Q_PROPERTY's comment.
   }
+  else if (_event->type() == QEvent::KeyPress || _event->type() == QEvent::KeyRelease)
+  {
+    auto *keyEvent = static_cast<QKeyEvent *>(_event);
+    const bool pressed = _event->type() == QEvent::KeyPress;
+
+    // Shift/Ctrl/S/J は「押されているか」をそのまま持つ。modifiers() を
+    // 方向キーが飛んだ瞬間に読む方式にしないのは、QML のパッドが
+    // shiftHeld/ctrlHeld/sHeld/jHeld を表示に使うためと、S が Qt の
+    // modifier ではないため。IsTextEditFocused() で塞がないのも意図的で、
+    // 名前欄にフォーカスがあっても表示だけは正しくしておく。
+    if (keyEvent->key() == Qt::Key_Shift && !keyEvent->isAutoRepeat() &&
+        pressed != this->directionKeys.Run())
+    {
+      this->directionKeys.SetRun(pressed);
+      this->shiftHeldChanged();
+      // 押しっぱなしの途中で Shift を足したらその場で走り出す。W を離して
+      // 押し直す必要はない。
+      this->RefreshHeldMovement();
+    }
+    else if (keyEvent->key() == Qt::Key_Control && !keyEvent->isAutoRepeat() &&
+        pressed != this->directionKeys.Slow())
+    {
+      this->directionKeys.SetSlow(pressed);
+      this->ctrlHeldChanged();
+      this->RefreshHeldMovement();
+    }
+    else if (keyEvent->key() == Qt::Key_S && !keyEvent->isAutoRepeat() &&
+        pressed != this->sHeldState)
+    {
+      this->sHeldState = pressed;
+      this->sHeldChanged();
+    }
+    else if (keyEvent->key() == Qt::Key_J && !keyEvent->isAutoRepeat() &&
+        pressed != this->directionKeys.Strafe())
+    {
+      this->directionKeys.SetStrafe(pressed);
+      this->jHeldChanged();
+      // J はストレイフの切替。押しっぱなしの最中でも即座に切り替わる。
+      this->RefreshHeldMovement();
+    }
+    else if (!keyEvent->isAutoRepeat() && PoseShortcutForKey(keyEvent->key()))
+    {
+      // 押している間だけその姿勢（K = 着席）。ただし L で登録済みの姿勢が
+      // ある人物では登録側が勝つ（UpdatePoseIntent() 参照）。
+      const std::string pose =
+          pressed ? PoseShortcutForKey(keyEvent->key())->pose : std::string();
+      if (pose != this->heldPoseState)
+      {
+        this->heldPoseState = pose;
+        this->heldPoseChanged();
+        this->UpdatePoseIntent(this->activeHumanIndex);
+      }
+    }
+
+    if (!keyEvent->isAutoRepeat() && !IsTextEditFocused())
+    {
+      if (pressed && keyEvent->key() == Qt::Key_L)
+      {
+        // L は「いまの姿勢を登録」。もう一度押すと解除。QML の
+        // 「現在の姿勢を登録」ボタンと同じ Q_INVOKABLE を呼ぶ。
+        this->togglePoseLock(this->activeHumanIndex);
+      }
+      else if (pressed && keyEvent->key() >= Qt::Key_1 && keyEvent->key() <= Qt::Key_9)
+      {
+        this->setActiveHuman(keyEvent->key() - Qt::Key_1);
+      }
+      else if (pressed &&
+          (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter))
+      {
+        // その場ジャンプ。方向キーを押していれば、その方向へ進みながら跳ぶ
+        // （teleopJump() は Z 方向を足すだけで、水平の指令はそのまま）。
+        this->teleopJump(this->activeHumanIndex);
+      }
+      else if (pressed && keyEvent->key() == Qt::Key_N)
+      {
+        // 即停止。これは以前 S の役目だったが、S はその場回転の
+        // モディファイアになった。
+        this->directionKeys.Clear();
+        this->teleopStop(this->activeHumanIndex);
+      }
+      else
+      {
+        std::string direction;
+        switch (keyEvent->key())
+        {
+          case Qt::Key_Q: direction = "Q"; break;
+          case Qt::Key_W: direction = "W"; break;
+          case Qt::Key_E: direction = "E"; break;
+          case Qt::Key_A: direction = "A"; break;
+          case Qt::Key_D: direction = "D"; break;
+          case Qt::Key_Z: direction = "Z"; break;
+          case Qt::Key_X: direction = "X"; break;
+          case Qt::Key_C: direction = "C"; break;
+          default: break;
+        }
+        if (!direction.empty())
+        {
+          if (this->sHeldState && (direction == "A" || direction == "D"))
+          {
+            // S+A / S+D はその場回転（A が左回り、D が右回り）。
+            this->directionKeys.Clear();
+            if (pressed)
+              this->teleopRotate(this->activeHumanIndex, direction == "A");
+            else
+              this->teleopStop(this->activeHumanIndex);
+          }
+          else if (IsSteerableDirection(direction))
+          {
+            // W/A/D/X は押しっぱなしの状態機械へ。単独なら向きを変えて
+            // 歩き、2 つ目が加われば曲がる。J 中はストレイフ。
+            if (pressed)
+              this->PressDirectionKey(direction);
+            else
+              this->ReleaseDirectionKey(direction);
+          }
+          else if (pressed)
+          {
+            // 斜め（Q/E/Z/C）は単発。既定は向きを変えて歩く、J 中は
+            // 従来のストレイフ。
+            this->directionKeys.Clear();
+            this->teleopDirection(this->activeHumanIndex,
+                QString::fromStdString(direction), !this->directionKeys.Strafe());
+          }
+          else
+          {
+            this->directionKeys.Clear();
+            this->teleopStop(this->activeHumanIndex);
+          }
+        }
+      }
+    }
+  }
+
   return QObject::eventFilter(_obj, _event);
 }
 }  // namespace gz_human_sim

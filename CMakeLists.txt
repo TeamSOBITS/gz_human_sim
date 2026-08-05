@@ -19,6 +19,8 @@ find_package(gz-transport13 REQUIRED)
 find_package(gz-gui8 REQUIRED)
 find_package(gz-rendering8 REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Core)
+# テレオペの実体。**依存は一方通行**（構想書 §11）。
+find_package(unified_entity_control REQUIRED)
 find_package(Boost REQUIRED)
 
 add_library(gz_human_actor_animation_control SHARED
@@ -91,6 +93,7 @@ add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanelRoute.cc
   src/gui/HumanControlPanelSpawn.cc
   src/gui/HumanControlPanelState.cc
+  src/gui/HumanControlPanelTeleop.cc
   src/gui/LaunchProcess.cc
   src/gui/PathPlanner.cc
   src/gui/PathTemplates.cc
@@ -119,6 +122,7 @@ set_target_properties(HumanControlPanel PROPERTIES
 )
 target_include_directories(HumanControlPanel PRIVATE include)
 target_link_libraries(HumanControlPanel
+  unified_entity_control::unified_entity_teleop
   gz-gui8::gz-gui8
   gz-rendering8::gz-rendering8
   gz-transport13::gz-transport13

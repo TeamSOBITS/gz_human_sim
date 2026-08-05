@@ -32,6 +32,11 @@
 #include "PathPlanner.hh"
 #include "PathTemplates.hh"
 #include "SfmBridge.hh"
+
+// テレオペの中身はこのライブラリにある（構想書 §11）。**依存は一方通行で、
+// あちらは gz_human_sim を知らない。** 逆向きの参照を足さないこと。
+#include <unified_entity_control/CommandDispatcher.hh>
+#include <unified_entity_control/DirectionKeys.hh>
 #include "WorldEntityService.hh"
 #include "SpawnMarkerRenderer.hh"
 #include "HumanRegistry.hh"
@@ -187,6 +192,29 @@ class HumanControlPanel : public gz::gui::Plugin
 
   /// \brief 選択中の人物の状態（サーバーが publish した値の表示用）。
   ///        このパネルが推測した値ではありません -- 構想書 §3。
+  // 修飾キーの保持状態。QML の移動パッドが押下表示に使う。
+  // 実体は DirectionKeys（unified_entity_control）が持つ。
+  Q_PROPERTY(bool shiftHeld READ ShiftHeld NOTIFY shiftHeldChanged)
+  Q_PROPERTY(bool ctrlHeld READ CtrlHeld NOTIFY ctrlHeldChanged)
+  Q_PROPERTY(bool sHeld READ SHeld NOTIFY sHeldChanged)
+  Q_PROPERTY(bool jHeld READ JHeld NOTIFY jHeldChanged)
+  // いま押されている姿勢キーの姿勢名（K なら "sit"）。登録済みの姿勢とは別。
+  Q_PROPERTY(QString heldPose READ HeldPose NOTIFY heldPoseChanged)
+  // 対象の人物に登録済みの姿勢。空なら未登録。
+  Q_PROPERTY(QString activeLockedPose READ ActiveLockedPose
+      NOTIFY activeLockedPoseChanged)
+  Q_PROPERTY(double jumpHeight READ JumpHeight NOTIFY jumpHeightChanged)
+  Q_PROPERTY(double speedMultiplier READ SpeedMultiplier
+      NOTIFY speedMultiplierChanged)
+  // DualSense（PS5）モード。実装は unified_entity_control 側にあり、
+  // ここは QML の表示と有効化トグルだけを持つ。
+  Q_PROPERTY(bool dualsenseModeEnabled READ DualsenseModeEnabled
+      WRITE SetDualsenseModeEnabled NOTIFY dualsenseModeChanged)
+  Q_PROPERTY(QString dualsenseStatusText READ DualsenseStatusText
+      NOTIFY dualsenseStatusChanged)
+  Q_PROPERTY(bool invertCameraY READ InvertCameraY
+      WRITE SetInvertCameraY NOTIFY invertCameraYChanged)
+
   Q_PROPERTY(QString activeCharacterState READ ActiveCharacterState
       NOTIFY characterStateChanged)
 
@@ -470,6 +498,38 @@ class HumanControlPanel : public gz::gui::Plugin
   /// ViewpointLabels()'s order: 0 = free camera, then chase/front/side/
   /// top/diagonal offsets scaled by _distance meters. Mirrors
   /// GuiderRobotManager::setViewpoint()'s view set.
+  /// \brief 移動パッド / キーボードから呼ばれる操作。
+  ///
+  /// **速度の作り方も送り方も unified_entity_control 側にある。**
+  /// ここは「何番の人物か」を EntityEntry に翻訳するだけ（Teleop.cc 参照）。
+  public: Q_INVOKABLE void teleopMove(
+      int _index, double _linear, double _lateral, double _angular);
+  public: Q_INVOKABLE void teleopStop(int _index);
+  public: Q_INVOKABLE void teleopJump(int _index);
+  public: Q_INVOKABLE void teleopRotate(int _index, bool _counterClockwise);
+  /// \param[in] _turnToFace true なら「押した方向の**絶対方位**を向きながら
+  ///            歩く」。絶対なので押し直しても回転が積み上がらない。
+  public: Q_INVOKABLE void teleopDirection(
+      int _index, const QString &_direction, bool _turnToFace);
+  /// \brief 現在の姿勢を登録する／登録を解除する。
+  public: Q_INVOKABLE void togglePoseLock(int _index);
+  public: Q_INVOKABLE void setJumpHeight(double _value);
+  public: Q_INVOKABLE void setSpeedMultiplier(double _value);
+
+  public: bool ShiftHeld() const;
+  public: bool CtrlHeld() const;
+  public: bool SHeld() const;
+  public: bool JHeld() const;
+  public: QString HeldPose() const;
+  public: QString ActiveLockedPose() const;
+  public: double JumpHeight() const;
+  public: double SpeedMultiplier() const;
+  public: bool DualsenseModeEnabled() const;
+  public: void SetDualsenseModeEnabled(bool _enabled);
+  public: QString DualsenseStatusText() const;
+  public: bool InvertCameraY() const;
+  public: void SetInvertCameraY(bool _enabled);
+
   public: Q_INVOKABLE void setViewpoint(int _index, int _viewIndex, double _distance);
 
   /// \brief Release any follow/track target and put the camera back at the
@@ -485,6 +545,36 @@ class HumanControlPanel : public gz::gui::Plugin
   /// the render thread (the only thread allowed to touch the Ogre2 scene).
   protected: bool eventFilter(QObject *_obj, QEvent *_event) override;
 
+
+  /// \brief _index の人物を、unified_entity_control が理解できる素の
+  /// 構造体へ翻訳する。**gz_human_sim の型を向こうへ渡さないための境界。**
+  private: unified_entity_control::EntityEntry EntryFor(int _index) const;
+
+  /// \brief DirectionKeys が返した「次にすべきこと」を対象へ送る。
+  private: void ApplyMotion(
+      const unified_entity_control::DirectionKeys::Motion &_motion);
+
+  private: void PressDirectionKey(const std::string &_direction);
+  private: void ReleaseDirectionKey(const std::string &_direction);
+  /// \brief キーの並びは変えずに、いまの倍率で送り直す。
+  private: void RefreshHeldMovement();
+
+  /// \brief 登録済みの姿勢と、押されている姿勢キーから、実際に送るべき
+  /// 姿勢を決める。登録が押下に優先する。
+  private: std::string EffectivePose(int _index) const;
+  private: void UpdatePoseIntent(int _index);
+
+  /// \brief 対象へ操作を送る係。人物のことは知らない。
+  private: unified_entity_control::CommandDispatcher dispatcher;
+  /// \brief 8 方向キーの押しっぱなし状態機械。速度倍率もここが持つ。
+  private: unified_entity_control::DirectionKeys directionKeys;
+  private: double jumpHeightState{0.45};
+  /// \brief いま押されている姿勢キーの姿勢名（K なら "sit"）。
+  private: std::string heldPoseState;
+  /// \brief S（その場回転モディファイア）の保持状態。
+  private: bool sHeldState{false};
+  private: bool dualsenseModeState{false};
+  private: bool invertCameraYState{false};
 
   private: void DiscoverWorld();
   private: void SetStatus(const QString &_status);
@@ -784,6 +874,17 @@ class HumanControlPanel : public gz::gui::Plugin
 
 
 
+  signals: void shiftHeldChanged();
+  signals: void ctrlHeldChanged();
+  signals: void sHeldChanged();
+  signals: void jHeldChanged();
+  signals: void heldPoseChanged();
+  signals: void activeLockedPoseChanged();
+  signals: void jumpHeightChanged();
+  signals: void speedMultiplierChanged();
+  signals: void dualsenseModeChanged();
+  signals: void dualsenseStatusChanged();
+  signals: void invertCameraYChanged();
   signals: void humansChanged();
   signals: void StatusChanged();
   signals: void activeHumanChanged();

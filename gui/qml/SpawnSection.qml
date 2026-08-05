@@ -1,10 +1,16 @@
 /*
  * SpawnSection -- 人物のスポーン。モデル・動作モード・名前・配置方法・人数・座標と、
-// スポーン済み一覧（各行の対象切替と削除）。
+ * スポーン済み一覧（各行の対象切替・削除・移動パッド）。
  *
- * HumanControlPanel.qml から切り出したもの（構想書 §13）。中身は変えていない。
- * 親の ColumnLayout の子として並んでいた要素をそのまま包んだので、
- * ルートは ColumnLayout のまま。Layout.fillWidth を親から引き継ぐ。
+ * HumanControlPanel.qml から切り出したもの（構想書 §13）。**中身は
+ * gz_human_sim_old と同一。** 変えたのは以下の 2 点だけ:
+ *
+ *   - 親の ColumnLayout の子として並んでいた要素を ColumnLayout で包んだ
+ *   - `id: root` とこのセクションが使うプロパティをここに置いた
+ *
+ * 2 点目は必須。**QML の id とプロパティはファイル単位のスコープ**なので、
+ * 分割元ファイルの `root` やプロパティはここからは見えない。付け忘れると
+ * バインディングが静かに切れる（実際に一度やった）。
  *
  * ロジックはここに書かないこと。C++ 側（HumanControlPanel）の
  * Q_PROPERTY / Q_INVOKABLE を呼ぶだけにする。
@@ -14,8 +20,13 @@ import QtQuick.Controls 2.2
 import QtQuick.Layouts 1.3
 
 ColumnLayout {
+  id: root
   Layout.fillWidth: true
   spacing: 10
+
+  property int selectedModelIndex: 0
+  property int selectedPoseIndex: 0
+  property int selectedFollowModeIndex: 0
 
   // ── 人物をspawn ────────────────────────────────────────
   // 1人でも複数人でも、座標指定でもクリック指定でも、ここ1か所で完結する
@@ -71,8 +82,7 @@ ColumnLayout {
   // have no ActorCommandPlugin, so follow_mode means nothing for them.
   // "テレオペ" (auto) is right for almost everyone; "経路専用" is for a
   // background character that should keep walking its route no matter
-  // what, ignoring a stray velocity command aimed at it by mistake。
-  // 操作そのものは unified_entity_control が担当する（構想書 §11）。
+  // what, ignoring a stray teleop press aimed at it by mistake.
   Label {
     visible: HumanControlPanel.isActorModel(selectedModelIndex)
     text: "動作モード"; color: "#536b67"
@@ -371,7 +381,7 @@ ColumnLayout {
           Button {
             text: "対象にする"
             // Any human can be the viewpoint target; only actor-backed
-            // ones actually respond to velocity commands, but selecting a
+            // ones actually respond to QWEASDZXC teleop, but selecting a
             // static one here still drives the global viewpoint panel
             // below.
             visible: HumanControlPanel.activeHumanIndex !== index
@@ -448,8 +458,67 @@ ColumnLayout {
           }
         }
 
+        // Teleop pad: press-and-hold buttons publish Twist while pressed
+        // and stop on release. Layout mirrors the QWEASDZXC keyboard
+        // shortcuts in HumanControlPanel::eventFilter() (Q W E / A S D /
+        // Z X C, S = stop) so mouse and keyboard drive this human the
+        // same way; the keyboard shortcuts always target whichever human
+        // is マークed "操作対象" (⌨) above, not necessarily this row.
+        GridLayout {
+          id: teleopPad
+          // The ListView delegate's own `index` (this human's row) would
+          // otherwise be shadowed by the Repeater below's delegate-local
+          // `index` (0-8, the direction-button's own position) -- capture
+          // it under a distinct name before entering that inner scope.
+          property int humanIndex: index
+          visible: HumanControlPanel.isHumanActorAt(humanIndex)
+          columns: 3
+          rowSpacing: 2
+          columnSpacing: 2
+
+          // Repeater over the QWEASDZXC layout instead of 9 near-identical
+          // Button blocks. Each Button gets its own contentItem (plain,
+          // non-eliding, wrapping Text) rather than the QQC2 default
+          // style's single-line elided Text -- that default silently
+          // collapsed our two-line "Q\n↖" labels down to just "…" at this
+          // button size.
+          Repeater {
+            model: [
+              {key: "Q", glyph: "↖"}, {key: "W", glyph: "↑"}, {key: "E", glyph: "↗"},
+              {key: "A", glyph: "←"}, {key: "N", glyph: "■"}, {key: "D", glyph: "→"},
+              {key: "Z", glyph: "↙"}, {key: "X", glyph: "↓"}, {key: "C", glyph: "↘"},
+            ]
+            delegate: Button {
+              Layout.preferredWidth: 40
+              Layout.preferredHeight: 40
+              contentItem: Text {
+                text: modelData.key + "\n" + modelData.glyph
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                wrapMode: Text.WordWrap
+                font.pixelSize: 12
+              }
+              // Movement keys turn to face where they're walking by
+              // default now (see teleopDirection()'s _turnToFace),
+              // matching the keyboard's diagonal-key branch: J held
+              // switches back to the old no-turn strafe. S-held-click on
+              // A/D instead spins in place (teleopRotate()), same as
+              // S+A/S+D from the keyboard.
+              onPressed: {
+                  if (modelData.key === "N") return
+                  if (HumanControlPanel.sHeld && (modelData.key === "A" || modelData.key === "D"))
+                      HumanControlPanel.teleopRotate(teleopPad.humanIndex, modelData.key === "A")
+                  else
+                      HumanControlPanel.teleopDirection(teleopPad.humanIndex, modelData.key,
+                          !HumanControlPanel.jHeld)
+              }
+              onReleased: HumanControlPanel.teleopStop(teleopPad.humanIndex)
+              onClicked: if (modelData.key === "N")
+                  HumanControlPanel.teleopStop(teleopPad.humanIndex)
+            }
+          }
+        }
       }
     }
   }
-
 }
