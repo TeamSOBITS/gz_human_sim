@@ -9,7 +9,6 @@
 #include <gz/rendering/RenderingIface.hh>
 
 #include "HumanControlPanelInternal.hh"
-#include "WorldEntityService.hh"
 
 // 当たり判定カプセルの QML 窓口と、人物ごとの表示状態の管理。
 //

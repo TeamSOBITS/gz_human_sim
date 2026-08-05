@@ -7,12 +7,12 @@
 
 #include "HumanControlPanelInternal.hh"
 
-// 視点操作の QML 窓口。カメラそのものを動かすのは CameraController で、
-// ここがやるのは **「何番の人物か」を名前と数値に翻訳すること**だけ。
+// 視点操作の QML 窓口。ここがやるのは
+// **「何番の人物か」を名前と数値に翻訳すること**だけ。
 //
-// 分けた理由は CameraController.hh の頭に書いてある（構想書 §13 段階4）。
-// 要するに、追従カメラは guide_robot にもある共通機能なので、人物固有の
-// 型（Human / HumanRegistry）を混ぜないでおきたい。その境界がこのファイル。
+// カメラそのものは unified_entity_gui::CameraController にある
+// （構想書 §12）。追従カメラは guide_robot にもある共通機能なので、
+// 人物固有の型を混ぜないでおきたい。その境界がこのファイル。
 
 namespace gz_human_sim
 {

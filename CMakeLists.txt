@@ -21,6 +21,8 @@ find_package(gz-rendering8 REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Core)
 # テレオペの実体。**依存は一方通行**（構想書 §11）。
 find_package(unified_entity_control REQUIRED)
+# 視点・マーカーなど「見る・描く」共通部品（構想書 §12）。
+find_package(unified_entity_gui REQUIRED)
 find_package(Boost REQUIRED)
 
 add_library(gz_human_actor_animation_control SHARED
@@ -83,8 +85,6 @@ target_link_libraries(gz_human_nav_grid_system
 # for the tables and constants they share), rather than the single
 # ~3700-line file this used to be.
 add_library(HumanControlPanel SHARED
-  src/gui/CameraController.cc
-  src/gui/CollisionBodyController.cc
   src/gui/HumanControlPanel.cc
   src/gui/HumanControlPanelCamera.cc
   src/gui/HumanControlPanelCollision.cc
@@ -94,23 +94,15 @@ add_library(HumanControlPanel SHARED
   src/gui/HumanControlPanelSpawn.cc
   src/gui/HumanControlPanelState.cc
   src/gui/HumanControlPanelTeleop.cc
-  src/gui/LaunchProcess.cc
   src/gui/PathPlanner.cc
   src/gui/PathTemplates.cc
   src/gui/SfmBridge.cc
-  src/gui/SpawnMarkerRenderer.cc
-  src/gui/WorldEntityService.cc
-  src/gui/CameraController.hh
-  src/gui/CollisionBodyController.hh
   src/gui/HumanControlPanel.hh
   src/gui/HumanRegistry.hh
   src/gui/HumanControlPanelInternal.hh
-  src/gui/LaunchProcess.hh
   src/gui/PathPlanner.hh
   src/gui/PathTemplates.hh
   src/gui/SfmBridge.hh
-  src/gui/SpawnMarkerRenderer.hh
-  src/gui/WorldEntityService.hh
   gui/HumanControlPanel.qrc
 )
 target_compile_features(HumanControlPanel PUBLIC cxx_std_17)
@@ -123,6 +115,7 @@ set_target_properties(HumanControlPanel PROPERTIES
 target_include_directories(HumanControlPanel PRIVATE include)
 target_link_libraries(HumanControlPanel
   unified_entity_control::unified_entity_teleop
+  unified_entity_gui::unified_entity_gui
   gz-gui8::gz-gui8
   gz-rendering8::gz-rendering8
   gz-transport13::gz-transport13
@@ -159,11 +152,6 @@ install(DIRECTORY
   config
   gui
   launch
-  # media/: the magic-circle texture HumanControlPanel maps onto its spawn
-  # markers. guide_robot ships an identical copy for its own robot spawn
-  # marker; regenerate both with
-  # `ros2 run guider_multifloor_builder guider_make_spawn_marker`.
-  media
   models
   rviz
   scripts

@@ -41,8 +41,6 @@
 
 
 #include "HumanControlPanelInternal.hh"
-#include "LaunchProcess.hh"
-#include "WorldEntityService.hh"
 
 // Spawn/removal pipeline: launch-process management, the collision probe
 // that finds a clear spawn position, and entity-existence confirmation.

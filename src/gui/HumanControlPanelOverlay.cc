@@ -11,9 +11,9 @@
 
 // スポーンマーカーの QML 窓口と、人物ごとのマーカーの割り当て。
 //
-// 描く仕事そのものは SpawnMarkerRenderer にある。ここに残っているのは
-// **「どの人物にどのマーカーが要るか」**という、人物を知っている側にしか
-// 判断できない部分だけ（分けた理由は SpawnMarkerRenderer.hh の頭を参照）。
+// 描く仕事そのものは unified_entity_gui::SpawnMarkerRenderer にある
+// （構想書 §12）。ここに残っているのは **「どの人物にどのマーカーが
+// 要るか」**という、人物を知っている側にしか判断できない部分だけ。
 
 namespace gz_human_sim
 {
@@ -46,7 +46,7 @@ QString HumanControlPanel::spawnMarkerColorAt(int _index) const
   int colorIndex = 0;
   if (this->humans.valid(_index))
     colorIndex = this->humans.at(_index).marker.colorIndex;
-  return SpawnMarkerRenderer::ColorHex(colorIndex);
+  return unified_entity_gui::SpawnMarkerRenderer::ColorHex(colorIndex);
 }
 
 void HumanControlPanel::ApplySpawnMarkers()

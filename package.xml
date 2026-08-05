@@ -37,4 +37,5 @@
     <build_type>ament_cmake</build_type>
   </export>
   <depend>unified_entity_control</depend>
+  <depend>unified_entity_gui</depend>
 </package>

@@ -26,9 +26,9 @@
 
 // サーバー側と共有する状態の定義（構想書 §3）。
 #include "gz_human_sim/CharacterState.hh"
-#include "CameraController.hh"
-#include "CollisionBodyController.hh"
-#include "LaunchProcess.hh"
+#include <unified_entity_gui/CameraController.hh>
+#include <unified_entity_gui/CollisionBodyController.hh>
+#include <unified_entity_gui/LaunchProcess.hh>
 #include "PathPlanner.hh"
 #include "PathTemplates.hh"
 #include "SfmBridge.hh"
@@ -37,12 +37,34 @@
 // あちらは gz_human_sim を知らない。** 逆向きの参照を足さないこと。
 #include <unified_entity_control/CommandDispatcher.hh>
 #include <unified_entity_control/DirectionKeys.hh>
-#include "WorldEntityService.hh"
-#include "SpawnMarkerRenderer.hh"
+#include <unified_entity_gui/WorldEntityService.hh>
+#include <unified_entity_gui/SpawnMarkerRenderer.hh>
 #include "HumanRegistry.hh"
 
 namespace gz_human_sim
 {
+// 視点の定数は unified_entity_gui にある（構想書 §12）。呼び出し側を
+// 修飾だらけにしないため、ここで名前を引き込む。**型や関数は引き込まない**
+// こと（どのパッケージのものか読めなくなる）。
+using unified_entity_gui::kViewFree;
+using unified_entity_gui::kViewFirstPerson;
+using unified_entity_gui::kViewBehind;
+using unified_entity_gui::kViewFront;
+using unified_entity_gui::kViewRight;
+using unified_entity_gui::kViewLeft;
+using unified_entity_gui::kViewTop;
+using unified_entity_gui::kViewFrontRightUp;
+using unified_entity_gui::kViewFrontLeftUp;
+using unified_entity_gui::kViewCount;
+using unified_entity_gui::kViewpointLabels;
+// マーカーの色数（人物ごとの色を spawn 順に割り当てるのに使う）。
+using unified_entity_gui::kMarkerColorCount;
+// 当たり判定ビジュアルの探索を打ち切るまでのフレーム数。
+using unified_entity_gui::kCollisionVisualMaxRetries;
+// ワールドサービスと子プロセス管理（構想書 §12）。
+namespace world_entity = unified_entity_gui::world_entity;
+namespace launch_process = unified_entity_gui::launch_process;
+
 /// \brief Sidebar plugin that spawns, removes and teleoperates gz_human_sim
 /// human models from inside the Gazebo GUI, replacing the rcjo2025_arena
 /// world's old practice of baking human_actor_1/2 directly into the world
@@ -729,7 +751,7 @@ class HumanControlPanel : public gz::gui::Plugin
   /// \brief GUI カメラの視点制御。人物のことは何も知らないクラスなので、
   /// 「何番の人物か」の解決は HumanControlPanelCamera.cc 側で行う。
   /// 将来 guide_robot と共通の GUI 基盤パッケージへ出す予定（構想書 §12）。
-  private: CameraController cameraController;
+  private: unified_entity_gui::CameraController cameraController;
 
   private: struct CachedPose
   {
@@ -778,12 +800,12 @@ class HumanControlPanel : public gz::gui::Plugin
   /// テンプレート（models/human_collision_body/model.sdf）は LoadConfig()
   /// で一度だけ読み込む。読めなければスポーン安全判定は丸ごと省略され、
   /// この機能が無かった頃と同じ挙動に戻る。
-  private: CollisionBodyController collisionBody;
+  private: unified_entity_gui::CollisionBodyController collisionBody;
 
   /// \brief 床のスポーンマーカーの描画。人物のことは知らないクラスなので、
   /// 誰にどのマーカーが要るかは HumanControlPanelOverlay.cc が決める。
   /// 将来 guide_robot と共通の GUI 基盤パッケージへ出す予定（構想書 §12）。
-  private: SpawnMarkerRenderer spawnMarkers;
+  private: unified_entity_gui::SpawnMarkerRenderer spawnMarkers;
 
 
   /// \brief Builds and publishes the register_human payload sending the

@@ -154,18 +154,17 @@ void HumanControlPanel::LoadConfig(const tinyxml2::XMLElement *)
         packagePrefix = libPath.substr(0, libDir) + "/../../..";
     }
   }
-  // Magic-circle texture for the spawn markers (see SpawnMarkerRenderer).
-  // Resolved from the same prefix; regenerate the asset itself with
-  // `ros2 run guider_multifloor_builder guider_make_spawn_marker`, which
-  // writes this copy and guide_robot's identical one together.
+  // 魔法陣テクスチャ。**原本は unified_entity_gui にある**（構想書 §12）。
+  // 以前はこのパッケージと guide_robot に同一バイト列でコピーされており、
+  // 片方だけ描き直すとズレる状態だった。パスの組み立てを向こうに任せて
+  // いるのは、install 先が変わったときに両方が揃って壊れないため。
   {
-    const std::string markerPath =
-        packagePrefix + "/share/gz_human_sim/media/spawn_marker.png";
-    if (std::ifstream(markerPath))
+    const std::string markerPath = unified_entity_gui::DefaultTexturePath();
+    if (!markerPath.empty())
       this->spawnMarkers.SetTexturePath(markerPath);
     else
-      gzwarn << "[HumanControlPanel] spawn marker texture not found at "
-             << markerPath << "; markers will be drawn untextured.\n";
+      gzwarn << "[HumanControlPanel] spawn marker texture not found in "
+             << "unified_entity_gui; markers will be drawn untextured.\n";
   }
 
   const std::string presetsPath =
