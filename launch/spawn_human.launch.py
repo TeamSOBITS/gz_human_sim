@@ -1,9 +1,12 @@
 import importlib.util
 import os
 
+from ament_index_python.packages import PackageNotFoundError
+from ament_index_python.packages import get_package_share_directory
+
 from launch import LaunchDescription
 from launch.actions import AppendEnvironmentVariable, DeclareLaunchArgument, IncludeLaunchDescription
-from launch.actions import OpaqueFunction
+from launch.actions import LogInfo, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
@@ -44,6 +47,7 @@ def _resolve_actor_model(context, namespace, model_name, collision_model_name,
         _actor_topic(namespace, 'set_follow_mode'),
         jump_topic=_actor_topic(namespace, 'cmd_jump'),
         pose_topic=_actor_topic(namespace, 'cmd_pose'),
+        state_topic=_actor_topic(namespace, 'state'),
         collision_model_name=collision_model_name,
         collision_cmd_vel_topic=collision_cmd_vel_topic, follow_mode=follow_mode)
 
@@ -186,6 +190,28 @@ def generate_launch_description():
         name='human_set_pose_bridge', namespace=namespace, output='screen', arguments=[[
             '/world/', world_name, '/set_pose',
             '@ros_gz_interfaces/srv/SetEntityPose@gz.msgs.Pose@gz.msgs.Boolean']])
+    # sobits_teleop はこのパッケージの package.xml に宣言されていない
+    # **任意の**追加物（キーボード/ジョイの teleop スタック）で、人物を spawn
+    # するだけなら要らない。にもかかわらず enable_teleop の既定が true なので、
+    # 未導入の環境では launch が
+    #   "package 'sobits_teleop' not found"
+    # で丸ごと落ちていた（実際に踏んだ）。人物を1体出すのに無関係の teleop
+    # パッケージが要る、というのがそもそもおかしい。
+    #
+    # 既定は変えない（使っている人の手順を壊さないため）が、**入っていなければ
+    # 黙って飛ばす**。guide_robot から使う場合はパッド/パネル側で操作するので、
+    # このスタックはもともと不要。
+    #
+    # なお「代わりに guide_robot に依存させる」のは**向きが逆**になる。
+    # 依存は guide_robot → gz_human_sim の片道で、逆を作ると循環し、
+    # gz_human_sim が単独でビルド・実行できるという前提（構想書 §0）が崩れる。
+    # teleop との継ぎ目はパッケージ依存ではなく roster の契約側に置く（§12）。
+    try:
+        get_package_share_directory('sobits_teleop')
+        teleop_available = True
+    except PackageNotFoundError:
+        teleop_available = False
+
     human_teleop = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([PathJoinSubstitution([
             FindPackageShare('sobits_teleop'), 'launch', 'gz_human_teleop.launch.py'])]),
@@ -196,7 +222,10 @@ def generate_launch_description():
             'use_pose_controller': PythonExpression([
                 "'", human_model,
                 "' not in ('walking_actor', 'DoctorFemaleWalk')"]),
-        }.items(), condition=IfCondition(LaunchConfiguration('enable_teleop')))
+        }.items(), condition=IfCondition(LaunchConfiguration('enable_teleop'))
+    ) if teleop_available else LogInfo(msg=(
+        'sobits_teleop が見つからないので teleop スタックは起動しません'
+        '（人物の spawn には不要です）。'))
 
     return LaunchDescription([
         declare_namespace_cmd, declare_world_name_cmd, declare_enable_teleop_cmd,

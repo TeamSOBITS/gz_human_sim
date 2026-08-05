@@ -1,1 +1,28 @@
-<!DOCTYPE RCC><RCC version="1.0"><qresource prefix="/HumanControlPanel"><file>HumanControlPanel.qml</file></qresource></RCC>
+<!DOCTYPE RCC><RCC version="1.0">
+  <!-- prefix はプラグイン名と一致させること。gz-gui は
+       :/<プラグイン名>/<プラグイン名>.qml を探す。また gz-gui は全プラグインを
+       1プロセスに load し Qt のリソース空間はプロセス全体で1つなので、
+       prefix が被ると別プラグインの QML を掴む。
+
+       セクションは qml/ サブディレクトリに置き、qmldir で型を宣言する。
+       同一ディレクトリの暗黙解決も相対 import も gz-gui のロード経路では
+       効かないため、親は絶対 qrc URL で import する（CLAUDE.md 罠1）。
+       **ファイルを増やしたら qml/qmldir にも足すこと。**
+
+       （このコメント内に "‑‑" を書かないこと。rcc の XML パースが
+        壊れてビルドが落ちる。CLAUDE.md 罠5 と同じ話で、実際に踏んだ） -->
+  <qresource prefix="/HumanControlPanel">
+    <file>HumanControlPanel.qml</file>
+    <file alias="qml/qmldir">qml/qmldir</file>
+    <file alias="qml/SpawnSection.qml">qml/SpawnSection.qml</file>
+    <file alias="qml/MarkerSection.qml">qml/MarkerSection.qml</file>
+    <file alias="qml/ViewpointSection.qml">qml/ViewpointSection.qml</file>
+    <file alias="qml/MoveParamsSection.qml">qml/MoveParamsSection.qml</file>
+    <file alias="qml/DualsenseSection.qml">qml/DualsenseSection.qml</file>
+    <file alias="qml/FollowModeSection.qml">qml/FollowModeSection.qml</file>
+    <file alias="qml/PoseSection.qml">qml/PoseSection.qml</file>
+    <file alias="qml/CollisionSection.qml">qml/CollisionSection.qml</file>
+    <file alias="qml/RouteSection.qml">qml/RouteSection.qml</file>
+    <file alias="qml/HelpSection.qml">qml/HelpSection.qml</file>
+  </qresource>
+</RCC>

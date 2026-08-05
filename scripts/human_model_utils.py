@@ -22,7 +22,7 @@ ACTOR_MODEL_NAMES = ('walking_actor', 'DoctorFemaleWalk')
 
 def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
                          remove_topic, follow_mode_topic, jump_topic='/cmd_jump',
-                         pose_topic='/cmd_pose',
+                         pose_topic='/cmd_pose', state_topic='/state',
                          collision_model_name='', collision_cmd_vel_topic='',
                          follow_mode='auto', animation_name='walk', animation_factor=4.0,
                          linear_velocity=1.0, linear_tolerance=0.1):
@@ -77,6 +77,12 @@ def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
         resolved_text = resolved_text.replace(
             '<pose_topic>/cmd_pose</pose_topic>',
             f'<pose_topic>{pose_topic}</pose_topic>', 1)
+        # 状態の publish 先（構想書 §3・§13 段階3）。他のトピックと同じく
+        # 人物名で名前空間を切る -- 切らないと全員が同じ /state へ流し込み、
+        # GUI がどれが誰の状態か分からなくなる。
+        resolved_text = resolved_text.replace(
+            '<state_topic>/state</state_topic>',
+            f'<state_topic>{state_topic}</state_topic>', 1)
         resolved_text = resolved_text.replace(
             '<collision_model_name></collision_model_name>',
             f'<collision_model_name>{collision_model_name}</collision_model_name>', 1)
@@ -94,6 +100,7 @@ def resolve_actor_model(package_share, model_name, velocity_topic, path_topic,
             f'<remove_topic>{remove_topic}</remove_topic>'
             f'<follow_mode_topic>{follow_mode_topic}</follow_mode_topic>'
             f'<jump_topic>{jump_topic}</jump_topic>'
+            f'<state_topic>{state_topic}</state_topic>'
             f'<collision_model_name>{collision_model_name}</collision_model_name>'
             f'<collision_cmd_vel_topic>{collision_cmd_vel_topic}</collision_cmd_vel_topic>'
             f'<follow_mode>{follow_mode}</follow_mode>'

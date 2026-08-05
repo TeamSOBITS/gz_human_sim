@@ -28,7 +28,7 @@ find_package(Boost REQUIRED)
 find_package(SDL2 REQUIRED)
 
 add_library(gz_human_actor_animation_control SHARED
-  src/actor_animation_control_plugin.cpp
+  src/server/actor_animation_control_plugin.cpp
 )
 target_link_libraries(gz_human_actor_animation_control
   gz-plugin2::gz-plugin2
@@ -36,7 +36,13 @@ target_link_libraries(gz_human_actor_animation_control
 )
 
 add_library(gz_human_actor_command SHARED
-  src/actor_command_plugin.cpp
+  src/server/actor_command_plugin.cpp
+)
+# include/ はサーバー側と GUI 側が **同じ定義** を見るための共有ヘッダ置き場
+# （いまは CharacterState.hh のみ）。状態はサーバーが持って publish し、
+# GUI は表示するだけ、という向きにするために要る -- 構想書 §3・§13 段階3。
+target_include_directories(gz_human_actor_command PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(gz_human_actor_command
   gz-plugin2::gz-plugin2
@@ -50,7 +56,7 @@ target_link_libraries(gz_human_actor_command
 # separate colcon package, so this builds standalone if the sibling
 # lightsfm/sfm_for_gazebo clones this was developed alongside are removed.
 add_library(gz_human_sfm_crowd_system SHARED
-  src/sfm_crowd_system.cpp
+  src/server/sfm_crowd_system.cpp
 )
 target_include_directories(gz_human_sfm_crowd_system PRIVATE
   third_party/lightsfm/include
@@ -67,7 +73,7 @@ target_link_libraries(gz_human_sfm_crowd_system
 # mirroring the Nav2 layering sobits_navigation_stack uses for the robots --
 # see the file header for the layer-by-layer correspondence.
 add_library(gz_human_nav_grid_system SHARED
-  src/nav_grid_system.cpp
+  src/server/nav_grid_system.cpp
 )
 target_link_libraries(gz_human_nav_grid_system
   gz-plugin2::gz-plugin2
@@ -79,10 +85,32 @@ target_link_libraries(gz_human_nav_grid_system
 # GUI plugin: spawns/removes/teleoperates gz_human_sim humans from the
 # Gazebo sidebar. Kept in its own lib/gz-gui search path, separate from
 # the gz-sim System plugins above (see GZ_GUI_PLUGIN_PATH env-hook below).
+# src/ は3層（構想書 §7・§13 段階5）:
+#   include/gz_human_sim/  サーバーと GUI が **同じ定義** を見る共有ヘッダ
+#   src/server/            gz-sim の System プラグイン（GUI を閉じても動く側）
+#   src/gui/               gz-gui のパネル（見せる/操作する側）
+# 依存は gui -> include <- server の一方向で、gui と server は直接は見ない。
+#
+# 責務ごとに割った .cc 群（構想書 §13 段階2）。クラス宣言は
+# HumanControlPanel.hh 1つのままで、ファイル間で共有する表と定数は
+# HumanControlPanelInternal.hh にある。AUTOMOC が Q_OBJECT を拾うのは
+# .hh なので、.cc を増やしてもここに並べるだけでよい。
 add_library(HumanControlPanel SHARED
-  src/HumanControlPanel.cc
-  src/HumanControlPanel.hh
+  src/gui/HumanControlPanel.cc
+  src/gui/HumanControlPanelCamera.cc
+  src/gui/HumanControlPanelCollision.cc
+  src/gui/HumanControlPanelInput.cc
+  src/gui/HumanControlPanelOverlay.cc
+  src/gui/HumanControlPanelRoute.cc
+  src/gui/HumanControlPanelSpawn.cc
+  src/gui/HumanControlPanelState.cc
+  src/gui/HumanControlPanelTeleop.cc
+  src/gui/HumanControlPanel.hh
+  src/gui/HumanControlPanelInternal.hh
   gui/HumanControlPanel.qrc
+)
+target_include_directories(HumanControlPanel PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_compile_features(HumanControlPanel PUBLIC cxx_std_17)
 set_target_properties(HumanControlPanel PROPERTIES

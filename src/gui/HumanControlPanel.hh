@@ -27,7 +27,22 @@ struct _SDL_GameController;
 #include <gz/math/Vector3.hh>
 #include <gz/msgs/pose_v.pb.h>
 #include <gz/rendering/RenderTypes.hh>
+#include <gz/msgs/param.pb.h>
+
+#include "HumanRegistry.hh"
+
 #include <gz/transport/Node.hh>
+
+// GuiderHumanCommandEvent.hh の前方宣言だけ。**ヘッダから include しない**
+// のは、あれが guide_robot 側の正本を手で写したコピーだから（罠4 と同じ
+// 事情）で、実体が要るのは受け口の .cc 1つだけ。
+namespace guider
+{
+  namespace events
+  {
+    class HumanCommandRequest;
+  }
+}
 
 namespace gz_human_sim
 {
@@ -283,6 +298,15 @@ class HumanControlPanel : public gz::gui::Plugin
   /// \brief Same as isHumanActorAt() but for the named-pose feature --
   /// whether the spawned human at this humanList row can be posed.
   public: Q_INVOKABLE bool isPoseCapableHumanAt(int _index) const;
+
+  /// \brief 人物 _index の、サーバーが言っている状態のラベル。
+  /// **GUI が推測した値ではない**（構想書 §3）。まだ受信していなければ「-」。
+  public: Q_INVOKABLE QString humanStateLabel(int _index) const;
+
+  /// \brief サーバーからの状態通知の受け口。**transport のスレッドから
+  /// 呼ばれる**ので、Qt のオブジェクトは直接触らないこと。
+  private: void OnCharacterState(
+      const std::string &_name, const gz::msgs::Param &_message);
 
   /// \brief Register/unregister _index's current pose (L key, or the QML
   /// button). Registering pins whatever pose the human is in right now --
@@ -563,111 +587,25 @@ class HumanControlPanel : public gz::gui::Plugin
   /// the render thread (the only thread allowed to touch the Ogre2 scene).
   protected: bool eventFilter(QObject *_obj, QEvent *_event) override;
 
-  private: struct Human
-  {
-    std::string name;
-    std::string model;
-    QProcess *process{nullptr};
-    gz::transport::Node::Publisher velocityPublisher;
-    gz::transport::Node::Publisher pathPublisher;
-    // Actors can't be removed through /world/<w>/remove (gz-sim's
-    // UserCommands system only accepts MODEL/LIGHT there); this instead
-    // tells the actor's own ActorCommandPlugin to remove itself via the
-    // ECM directly. Only valid for actor-backed humans, same as the two
-    // publishers above.
-    gz::transport::Node::Publisher removePublisher;
-    // Jump requests (see teleopJump()) -- only advertised for actor-backed
-    // humans, same as velocityPublisher/pathPublisher above.
-    gz::transport::Node::Publisher jumpPublisher;
-    // Runtime follow_mode changes (setFollowMode()) -- separate from the
-    // spawn-time follow_mode:= launch argument, which only sets the
-    // initial SDF value. followModeIndex mirrors viewIndex below: index
-    // into FollowModeLabels()/kFollowModeValues, kept in sync so the
-    // global combo shows this human's actual current mode when switched
-    // to, rather than always resetting to "テレオペ".
-    gz::transport::Node::Publisher followModePublisher;
-    int followModeIndex{0};
-    // Named-pose intent (pose_topic) -- only advertised for pose-capable
-    // actor humans (see IsPoseCapableIndex()), same as jumpPublisher above.
-    // lockedPose is the L key's registered pose: non-empty means this human
-    // holds that pose on its own, with no key held down, until it's
-    // unregistered -- see UpdatePoseIntent()/togglePoseLock() in the .cc.
-    gz::transport::Node::Publisher posePublisher;
-    std::string lockedPose;
-    // Bumped by every teleopDirection()/teleopStop() call for this human.
-    // "X" schedules a delayed second Twist (see teleopDirection()); that
-    // callback only fires if this still matches the value it captured,
-    // so a later key press/release in the meantime cancels it instead of
-    // stomping on whatever the user asked for next.
-    int teleopGeneration{0};
-    // Last viewpoint setViewpoint() applied to this human (0 = free/never
-    // set). Lets the global viewpoint combo (see ActiveViewIndex()) show
-    // the right selection when switching which human is active, instead
-    // of always resetting to "自由視点".
-    int viewIndex{0};
-    double viewDistance{2.0};
+  /// \brief guide_robot の GuiderPadController から来る「人物への指令」の
+  /// 受け口（GuiderHumanCommandEvent.hh）。`pad_ui:=true` では
+  /// サイドバーにパネルが1枚も無く、このパネルの QML は**見えない**ので、
+  /// spawn・ジャンプ・歩行速度・追従モード・目的地は**パッドからしか
+  /// 触れない**。ここがその唯一の入口。
+  ///
+  /// **同期呼び出しである**（App()->sendEvent() は直接呼び出し）。
+  /// 呼び出し側は戻った直後に Reply() を読むので、返事を書く命令は
+  /// この関数の中で書き切ること。**キューしてはいけない。**
+  ///
+  /// 分からない命令には SetHandled() を立てない。パッド側が
+  /// 「人物パネルが古い/居ない」と**言える**ようにするため（黙って
+  /// 何も起きないのが罠13の失敗の形）。
+  private: void HandleHumanCommand(
+      guider::events::HumanCommandRequest *_request);
 
-    // Collision-body debug visualization (see human_collision_body/
-    // model.sdf's translucent capsule) -- only meaningful for actor-backed
-    // humans, same as velocityPublisher above (checked the same way:
-    // velocityPublisher.Valid()). showCollision is the desired on/off
-    // state (setShowCollision()/setShowCollisionAll()); the other two are
-    // ApplyCollisionVisibility()'s own render-thread bookkeeping.
-    //
-    // Defaults to hidden: the capsule is a debug aid (see
-    // human_collision_body/model.sdf's own comment), not something a user
-    // driving/watching a human normally wants cluttering the view, so it
-    // starts off and has to be opted into per row (or via "all") from the
-    // panel. appliedShowCollision still starts at the tri-state "nothing
-    // applied yet" below, so this hidden state is explicitly pushed to the
-    // freshly-spawned collision body on frame one rather than assumed.
-    //
-    // appliedShowCollision is deliberately a tri-state int (-1 = nothing
-    // applied yet) rather than a bool, so a freshly (re)spawned
-    // collision body always gets the current state pushed to it even when
-    // that state happens to equal the previous one -- see
-    // applyCollisionSize(), which resets it.
-    bool showCollision{false};
-    int appliedShowCollision{-1};
-    int collisionVisualRetries{0};
-    // Current capsule dimensions, updated by applyCollisionSize() -- kept
-    // here so the QML size sliders can read back what's actually applied
-    // (collisionRadiusAt()/collisionLengthAt()) when switching which human
-    // is active, same idea as followModeIndex/viewIndex above. Defaults
-    // match models/human_collision_body/model.sdf's own spawn-time values.
-    double collisionRadius{0.25};
-    double collisionLength{1.2};
-
-    // Crowd/SFM feature set -- see the Q_PROPERTY block's comment at the
-    // top of this class. The route itself and the useSfm/cyclicRoute
-    // settings are global now (one route applied to every ticked target);
-    // what stays per-human is whether this human is one of those targets,
-    // and sfmEnabled, which mirrors whatever this panel last published on
-    // sfmEnablePublisher -- kept here (rather than re-deriving it) purely
-    // so ActiveSfmEnabled() can show the right toggle state without an
-    // extra round trip.
-    bool routeTarget{true};
-    bool sfmEnabled{true};
-    gz::transport::Node::Publisher sfmEnablePublisher;
-
-    // Spawn marker (see setShowSpawnMarker()/ApplySpawnMarkers()): where
-    // this human was originally spawned, the colour its marker is drawn in,
-    // and the same "desired vs. applied" pair ApplyCollisionVisibility()
-    // uses -- appliedShowSpawnMarker is a tri-state int (-1 = nothing
-    // applied yet) for the same reason appliedShowCollision is.
-    //
-    // markerVisual is the render-scene visual itself, created lazily on the
-    // render thread and owned here so removeHuman() can queue exactly that
-    // one for destruction. Shown by default: the whole point of the marker
-    // is to see where people started without having to ask for it.
-    double spawnX{0.0};
-    double spawnY{0.0};
-    double spawnZ{0.0};
-    int markerColorIndex{0};
-    bool showSpawnMarker{true};
-    int appliedShowSpawnMarker{-1};
-    gz::rendering::VisualPtr markerVisual;
-  };
+  // 人物1体ぶんのデータと、その一覧。src/HumanRegistry.hh へ移した
+  // （構想書 §6・§13 段階4）。**添字ではなく名前で引くこと** --
+  // 削除で添字がずれるため。IndexOf()/Find() がそのためにある。
 
   /// \brief Pending camera command, written on the Qt thread by
   /// setViewpoint() and consumed on the render thread by ApplyViewpoint().
@@ -951,7 +889,7 @@ class HumanControlPanel : public gz::gui::Plugin
   private: void PublishRoster();
 
   private: QTimer *rosterTimer{nullptr};
-  private: std::vector<Human> humans;
+  private: HumanRegistry humans;
   private: std::string worldName;
   private: QString statusText{"ワールドを検出中…"};
   private: QStringList posePresetList;
