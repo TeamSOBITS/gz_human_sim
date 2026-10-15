@@ -1,33 +1,8 @@
-"""
-Script for adding objects in .glb or .obj format.
+"""Create a models/<name>/ template for a .obj or .glb mesh (run from the package root).
 
-Note: To display in a world, you need to write it in the xacro file.
-Note: This script only creates templates in the models/ directory.
-Note: If you get a "model not found" error, it's usually because you haven't run colcon build.
+    python3 scripts/create_model_template.py <model-name> <obj|glb>
 
-Usage:
-
-Navigate to the package root.
-
-```sh
-cd ~/colcon_ws/src/sobits_gazebo_world
-```
-
-Run the following script depending on the 3D model format.
-
-```sh
-python3 scripts/create_model_template.py <model-name> <obj | glb>
-```
-
-Example
-
-```
-# To use chair in .obj format
-python3 scripts/create_model_template.py chair obj
-
-# To use chair in .glb format
-python3 scripts/create_model_template.py chair glb
-```
+Add the model to a world's xacro to show it; colcon build before use ("model not found" otherwise).
 """
 import os
 import argparse

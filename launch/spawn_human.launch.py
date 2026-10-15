@@ -190,24 +190,37 @@ def generate_launch_description():
         ],
     )
 
+    # Teleop is a plain sobits_teleop robot; this package owns the sim-side node.
     human_teleop = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([
                 FindPackageShare('sobits_teleop'),
                 'launch',
-                'gz_human_teleop.launch.py',
+                'sobits_teleop.launch.py',
             ])
         ]),
         launch_arguments={
-            'namespace': namespace,
+            'robot_name': 'gz_human',
             'device': device,
+        }.items(),
+        condition=IfCondition(LaunchConfiguration('enable_teleop'))
+    )
+
+    human_cmd_vel_controller = Node(
+        package='gz_human_sim',
+        executable='human_cmd_vel_controller.py',
+        name='human_cmd_vel_controller',
+        namespace=namespace,
+        output='screen',
+        parameters=[{
             'world_name': world_name,
             'model_name': model_name,
-            'x': x,
-            'y': y,
-            'z': z,
-            'yaw': yaw,
-        }.items(),
+            'initial_x': x,
+            'initial_y': y,
+            'initial_z': z,
+            'initial_yaw': yaw,
+            'cmd_vel_topic': '/gz_human/cmd_vel',
+        }],
         condition=IfCondition(LaunchConfiguration('enable_teleop'))
     )
 
@@ -228,4 +241,5 @@ def generate_launch_description():
         human_set_pose_bridge,
         OpaqueFunction(function=_spawn_human_cmd),
         human_teleop,
+        human_cmd_vel_controller,
     ])
